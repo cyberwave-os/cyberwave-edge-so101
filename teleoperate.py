@@ -5,6 +5,7 @@ import asyncio
 import logging
 import queue
 import select
+import signal
 import sys
 import threading
 import time
@@ -316,7 +317,7 @@ Worker thread that processes actions from the queue and updates Cyberwave twin.
                     )
                     processed_count += len(batch_updates)
                 except Exception as e:
-                    error_count += len(batch_updates) 
+                    error_count += len(batch_updates)
                     logger.warning(
                         f"Failed to send batch update for {len(batch_updates)} joints: {e}",
                         exc_info=True
@@ -677,7 +678,7 @@ def teleoperate(
             while not stop_event.is_set():
                 time.sleep(0.1)
         except KeyboardInterrupt:
-            logger.info("Camera streaming interrupted by user")
+            logger.info("Camera streaming interrupted by user (Ctrl+C)")
             stop_event.set()
         finally:
             # Stop camera streaming thread
@@ -848,6 +849,11 @@ def teleoperate(
             skip_count = 0
             while not stop_event.is_set():
                 time.sleep(0.1)
+    except KeyboardInterrupt:
+        logger.info("Received KeyboardInterrupt (Ctrl+C), shutting down gracefully...")
+        stop_event.set()
+        update_count = 0
+        skip_count = 0
     finally:
         # Signal all threads to stop
         logger.info("Stopping all worker threads...")
@@ -856,14 +862,19 @@ def teleoperate(
         # Stop MQTT update worker thread
         if worker_thread is not None:
             logger.info("Stopping Cyberwave update worker thread...")
-            # Wait for queue to drain (with timeout)
+            # Clear the queue to allow quick shutdown
             try:
-                action_queue.join(timeout=2.0)
+                while not action_queue.empty():
+                    try:
+                        action_queue.get_nowait()
+                        action_queue.task_done()
+                    except queue.Empty:
+                        break
             except Exception:
                 pass
 
             # Wait for thread to finish
-            worker_thread.join(timeout=1.0)
+            worker_thread.join(timeout=2.0)
             if worker_thread.is_alive():
                 logger.warning("MQTT update worker thread did not stop in time")
             else:
@@ -1010,6 +1021,21 @@ def main():
         follower = SO101Follower(config=follower_config)
         follower.connect()
 
+    # Set up signal handler for graceful shutdown (works better over SSH)
+    interrupted = threading.Event()
+
+    def signal_handler(signum, frame):
+        """Handle SIGINT (Ctrl+C) and SIGTERM signals."""
+        signal_name = "SIGINT" if signum == signal.SIGINT else f"signal {signum}"
+        logger.info(f"\nReceived {signal_name}, shutting down gracefully... (press Ctrl+C again to force quit)")
+        interrupted.set()
+        # Restore default handler so a second Ctrl+C will force quit
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
     try:
         teleoperate(
             leader=leader,
@@ -1025,6 +1051,8 @@ def main():
             camera_twin_uuid=args.camera_twin_uuid,
             twin=twin
         )
+    except KeyboardInterrupt:
+        logger.info("\nReceived KeyboardInterrupt, shutting down...")
     finally:
         if leader is not None:
             leader.disconnect()
