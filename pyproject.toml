@@ -32,7 +32,7 @@ classifiers = [
 dependencies = [
     "pyserial>=3.5",
     "feetech-servo-sdk",
-    "cyberwave",
+    "cyberwave[camera]>=0.2.2",
 ]
 
 [project.optional-dependencies]
