@@ -1,0 +1,14 @@
+annotated-types==0.7.0
+cyberwave==0.2.2
+-e git+https://github.com/cyberwave-os/cyberwave-edge-python-so101.git@42c0ac4e182ef69efd5261d46bbda6275a70e43d#egg=cyberwave_so101
+feetech-servo-sdk==1.0.0
+paho-mqtt==2.1.0
+pydantic==2.12.4
+pydantic_core==2.41.5
+pyserial==3.5
+python-dateutil==2.9.0.post0
+six==1.17.0
+-e git+https://github.com/cyberwave-os/cyberwave-edge-python-so101.git@42c0ac4e182ef69efd5261d46bbda6275a70e43d#egg=so101_lib
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+urllib3==2.5.0
