@@ -304,7 +304,7 @@ Worker thread that processes actions from the queue and updates Cyberwave twin.
                 try:
                     # Send all joints in the batch
                     for joint_index, (position, velocity, effort) in batch_updates.items():
-                        twin.joints.set(joint_name=str(joint_index), position=position, velocity=velocity, effort=effort)
+                        twin.joints.set(joint_name=str(joint_index), position=position, degrees=False)
                     processed_count += len(batch_updates)
                 except Exception as e:
                     error_count += len(batch_updates)
