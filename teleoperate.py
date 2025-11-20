@@ -190,21 +190,19 @@ def cyberwave_update_worker(
     twin: Optional[Twin] = None,
 ) -> None:
     """
-Worker thread that processes actions from the queue and updates Cyberwave twin.
+    Worker thread that processes actions from the queue and updates Cyberwave twin.
 
     Batches multiple joint updates together and skips updates where position is 0.0.
     Velocity and effort are hardcoded to 0.0 to avoid issues.
 
     Args:
         action_queue: Queue containing (joint_name, action_data) tuples where action_data
-                     is a dict with 'position', 'velocity', and 'load' keys
-        client: CyberwaveMQTTClient instance
-        twin_uuid: UUID of the twin to update
-        calibration_data: Calibration data dictionary
+                     is a dict with 'position', 'velocity', 'load', and 'timestamp' keys
         joint_name_to_index: Dictionary mapping joint names to joint indexes (1-6)
         joint_name_to_norm_mode: Dictionary mapping joint names to normalization modes
         use_radians: Whether to convert positions to radians (only for DEGREES mode)
         stop_event: Event to signal thread to stop
+        twin: Optional Twin instance for updating joint states
     """
     logger.debug("Cyberwave update worker thread started")
     processed_count = 0
@@ -214,7 +212,7 @@ Worker thread that processes actions from the queue and updates Cyberwave twin.
     while not stop_event.is_set():
         try:
             # Collect multiple joint updates for batching
-            batch_updates = {}  # joint_index -> (position, velocity, effort)
+            batch_updates = {}  # joint_index -> (position, velocity, effort, timestamp)
             batch_start_time = time.time()
 
             # Collect updates until timeout or queue is empty
@@ -242,6 +240,7 @@ Worker thread that processes actions from the queue and updates Cyberwave twin.
 
                     # Extract normalized position from action_data (velocity and effort are hardcoded to 0.0)
                     normalized_position = action_data.get("position", 0.0)
+                    timestamp = action_data.get("timestamp")  # Extract timestamp from action_data
 
                     # Get normalization mode for this joint
                     norm_mode = joint_name_to_norm_mode.get(joint_name, MotorNormMode.DEGREES)
@@ -287,7 +286,7 @@ Worker thread that processes actions from the queue and updates Cyberwave twin.
                         continue
 
                     # Store in batch (overwrite if same joint appears multiple times)
-                    batch_updates[joint_index] = (position, velocity, effort)
+                    batch_updates[joint_index] = (position, velocity, effort, timestamp)
                     action_queue.task_done()
 
                 except Exception as e:
@@ -303,8 +302,8 @@ Worker thread that processes actions from the queue and updates Cyberwave twin.
             if batch_updates:
                 try:
                     # Send all joints in the batch
-                    for joint_index, (position, _, _) in batch_updates.items():
-                        twin.joints.set(joint_name=str(joint_index), position=position, degrees=False)
+                    for joint_index, (position, _, _, timestamp) in batch_updates.items():
+                        twin.joints.set(joint_name=str(joint_index), position=position, degrees=False, timestamp=timestamp)
                     processed_count += len(batch_updates)
                 except Exception as e:
                     error_count += len(batch_updates)
@@ -328,6 +327,7 @@ def _process_cyberwave_updates(
     position_threshold: float,
     velocity_threshold: float,
     effort_threshold: float,
+    timestamp: float,
 ) -> tuple[int, int]:
     """
     Process leader action and queue Cyberwave updates for changed joints.
@@ -341,7 +341,7 @@ def _process_cyberwave_updates(
         position_threshold: Minimum change in normalized position to trigger update
         velocity_threshold: Unused (kept for compatibility)
         effort_threshold: Unused (kept for compatibility)
-
+        timestamp: Timestamp to associate with this update (generated in teleop loop)
     Returns:
         Tuple of (update_count, skip_count)
     """
@@ -369,12 +369,13 @@ def _process_cyberwave_updates(
             last_observation[joint_name] = normalized_pos
 
             # Queue action for Cyberwave update (non-blocking)
-            # Format: (joint_name, {"position": normalized_pos, "velocity": 0.0, "load": 0.0})
+            # Format: (joint_name, {"position": normalized_pos, "velocity": 0.0, "load": 0.0, "timestamp": timestamp})
             # Worker thread will handle conversion to degrees/radians
             action_data = {
                 "position": normalized_pos,
                 "velocity": 0.0,  # Hardcoded to 0.0
                 "load": 0.0,  # Hardcoded to 0.0
+                "timestamp": timestamp,  # Add timestamp from teleop loop
             }
             try:
                 action_queue.put_nowait((joint_name, action_data))
@@ -518,6 +519,9 @@ def _teleop_loop(
     try:
         while not stop_event.is_set():
             loop_start = time.time()
+            
+            # Generate timestamp for this iteration (before reading action)
+            timestamp = time.time()
 
             # Read action from leader (normalized positions with .pos suffix)
             action = leader.get_action()
@@ -532,6 +536,7 @@ def _teleop_loop(
                 position_threshold=position_threshold,
                 velocity_threshold=velocity_threshold,
                 effort_threshold=effort_threshold,
+                timestamp=timestamp,  # Pass timestamp to processing function
             )
             total_update_count += update_count
             total_skip_count += skip_count
