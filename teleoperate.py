@@ -183,9 +183,6 @@ def _camera_worker_thread(
 
 def cyberwave_update_worker(
     action_queue: queue.Queue,
-    client: CyberwaveMQTTClient,
-    twin_uuid: str,
-    calibration_data: Dict,
     joint_name_to_index: Dict[str, int],
     joint_name_to_norm_mode: Dict[str, MotorNormMode],
     use_radians: bool,
@@ -307,13 +304,7 @@ Worker thread that processes actions from the queue and updates Cyberwave twin.
                 try:
                     # Send all joints in the batch
                     for joint_index, (position, velocity, effort) in batch_updates.items():
-                        client.update_joint_state(
-                        twin_uuid=twin_uuid,
-                        joint_name=str(joint_index),
-                        position=position,
-                        velocity=velocity,
-                        effort=effort,
-                    )
+                        twin.joints.set(joint_name=str(joint_index), position=position, velocity=velocity, effort=effort)
                     processed_count += len(batch_updates)
                 except Exception as e:
                     error_count += len(batch_updates) 
@@ -782,7 +773,7 @@ def teleoperate(
     if client is not None:
         worker_thread = threading.Thread(
             target=cyberwave_update_worker,
-            args=(action_queue, client, twin_uuid, calibration_data, joint_name_to_index, joint_name_to_norm_mode, use_radians, stop_event, twin),
+            args=(action_queue, joint_name_to_index, joint_name_to_norm_mode, use_radians, stop_event, twin),
             daemon=True,
         )
         worker_thread.start()
@@ -970,8 +961,6 @@ def main():
     mqtt_client = None
     if args.token:
         cyberwave_client = Cyberwave(token=args.token)
-        cyberwave_client.mqtt._topic_prefix = "local"
-        # cyberwave_client.mqtt.topic_prefix = "local"
         twin = cyberwave_client.twin(
             asset_key="the-robot-studio/so101",
             environment_id=args.environment_uuid,
