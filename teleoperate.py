@@ -798,7 +798,6 @@ def teleoperate(
     # Thresholds: position is in normalized units (e.g., 0.1 for normalized position change)
     # Worker thread handles conversion to degrees/radians for Cyberwave
     logger.info(f"Starting teleoperation loop at {fps} fps")
-    logger.info(f"Updating twin _uuid} with leader positions")
     logger.info(
         f"Change thresholds: position={position_threshold} (normalized), "
         f"velocity={velocity_threshold}, effort={effort_threshold}"
