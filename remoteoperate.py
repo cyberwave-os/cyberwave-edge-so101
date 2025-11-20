@@ -281,6 +281,7 @@ def _create_joint_state_callback(
 
             # Convert joint_name to joint_index
             # joint_name is a string like "5" (joint index) or could be a joint name like "shoulder_pan"
+            joint_index = None  # Initialize before try block
             try:
                 joint_index = int(joint_name_str)
             except (ValueError, TypeError):
@@ -342,7 +343,7 @@ def _create_joint_state_callback(
                     "Consider increasing queue size."
                 )
 
-    except Exception as e:
+        except Exception as e:
             logger.error(f"Error processing joint state update: {e}", exc_info=True)
 
     return callback
@@ -485,7 +486,7 @@ def remoteoperate(
     writer_thread = threading.Thread(
         target=_motor_writer_worker,
         args=(action_queue, follower, stop_event),
-                daemon=True,
+        daemon=True,
     )
     writer_thread.start()
     logger.info("Started motor writer worker thread")
@@ -493,8 +494,8 @@ def remoteoperate(
     try:
         # Main loop: just wait for stop event
         logger.info("Remote operation active. Waiting for joint state updates...")
-            while not stop_event.is_set():
-                time.sleep(0.1)
+        while not stop_event.is_set():
+            time.sleep(0.1)
     except KeyboardInterrupt:
         logger.info("Remote operation interrupted by user")
         stop_event.set()
@@ -503,17 +504,17 @@ def remoteoperate(
         logger.info("Stopping all worker threads...")
         stop_event.set()
 
-            # Wait for queue to drain (with timeout)
-            try:
-                action_queue.join(timeout=2.0)
-            except Exception:
-                pass
+        # Wait for queue to drain (with timeout)
+        try:
+            action_queue.join(timeout=2.0)
+        except Exception:
+            pass
 
         # Wait for writer thread to finish
         writer_thread.join(timeout=1.0)
         if writer_thread.is_alive():
             logger.warning("Motor writer thread did not stop in time")
-            else:
+        else:
             logger.info("Motor writer thread stopped successfully")
 
         logger.info("Remote operation loop ended")
@@ -585,9 +586,9 @@ def main():
     from config import FollowerConfig
 
     follower_config = FollowerConfig(
-    port=args.follower_port,
-    max_relative_target=args.max_relative_target,
-    id=args.follower_id,
+        port=args.follower_port,
+        max_relative_target=args.max_relative_target,
+        id=args.follower_id,
     )
     follower = SO101Follower(config=follower_config)
     follower.connect()
