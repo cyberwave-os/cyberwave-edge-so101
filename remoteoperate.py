@@ -598,6 +598,8 @@ def main():
             client=cyberwave_client,
             follower=follower,
         )
+    except Exception as e:
+        logger.error(f"Error in remoteoperate: {e}", exc_info=True)
     finally:
         if follower is not None:
             follower.disconnect()
