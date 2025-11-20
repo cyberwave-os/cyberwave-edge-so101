@@ -303,7 +303,7 @@ Worker thread that processes actions from the queue and updates Cyberwave twin.
             if batch_updates:
                 try:
                     # Send all joints in the batch
-                    for joint_index, (position, velocity, effort) in batch_updates.items():
+                    for joint_index, (position, _, _) in batch_updates.items():
                         twin.joints.set(joint_name=str(joint_index), position=position, degrees=False)
                     processed_count += len(batch_updates)
                 except Exception as e:
@@ -798,7 +798,7 @@ def teleoperate(
     # Thresholds: position is in normalized units (e.g., 0.1 for normalized position change)
     # Worker thread handles conversion to degrees/radians for Cyberwave
     logger.info(f"Starting teleoperation loop at {fps} fps")
-    logger.info(f"Updating twin {twin_uuid} with leader positions")
+    logger.info(f"Updating twin _uuid} with leader positions")
     logger.info(
         f"Change thresholds: position={position_threshold} (normalized), "
         f"velocity={velocity_threshold}, effort={effort_threshold}"
