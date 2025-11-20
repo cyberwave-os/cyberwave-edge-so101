@@ -307,7 +307,7 @@ Worker thread that processes actions from the queue and updates Cyberwave twin.
                         twin.joints.set(joint_name=str(joint_index), position=position, velocity=velocity, effort=effort)
                     processed_count += len(batch_updates)
                 except Exception as e:
-                    error_count += len(batch_updates) 
+                    error_count += len(batch_updates)
                     logger.warning(
                         f"Failed to send batch update for {len(batch_updates)} joints: {e}",
                         exc_info=True
@@ -810,7 +810,7 @@ def teleoperate(
         actions = {joint_name_to_index[key]: val for key, val in actions.items()}
         # Send actions to Cyberwave as single update
         client.publish_initial_observation(
-            twin_uuid=twin_uuid,
+            twin_uuid=twin.uuid,
             observation=actions,
         )
         logger.info(f"Initial observation sent to Cyberwave twin {twin_uuid}, {len(actions)} joints updated")
