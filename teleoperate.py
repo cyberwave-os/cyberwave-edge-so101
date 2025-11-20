@@ -810,7 +810,7 @@ def teleoperate(
         # Send actions to Cyberwave as single update
         client.publish_initial_observation(
             twin_uuid=twin.uuid,
-            observation=actions,
+            observations=actions,
         )
         logger.info(f"Initial observation sent to Cyberwave twin {twin_uuid}, {len(actions)} joints updated")
 
