@@ -578,19 +578,19 @@ def main():
     )
 
     # Initialize Cyberwave client
-        cyberwave_client = Cyberwave(token=args.token)
+    cyberwave_client = Cyberwave(token=args.token)
     logger.info("Initialized Cyberwave client")
 
     # Initialize follower
-        from config import FollowerConfig
+    from config import FollowerConfig
 
-        follower_config = FollowerConfig(
-        port=args.follower_port,
-        max_relative_target=args.max_relative_target,
-        id=args.follower_id,
-        )
-        follower = SO101Follower(config=follower_config)
-        follower.connect()
+    follower_config = FollowerConfig(
+    port=args.follower_port,
+    max_relative_target=args.max_relative_target,
+    id=args.follower_id,
+    )
+    follower = SO101Follower(config=follower_config)
+    follower.connect()
 
     try:
         remoteoperate(
