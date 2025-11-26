@@ -10,7 +10,7 @@ import threading
 import time
 from typing import Dict, Optional
 
-from cyberwave import Cyberwave, CyberwaveMQTTClient, Twin
+from cyberwave import Cyberwave, Twin
 
 from follower import SO101Follower
 from leader import SO101Leader
@@ -619,10 +619,10 @@ def _teleop_loop(
 def teleoperate(
     leader: Optional[SO101Leader],
     twin_uuid: str,
-    client: CyberwaveMQTTClient = None,
     cyberwave_client: Optional[Cyberwave] = None,
     follower: Optional[SO101Follower] = None,
     fps: int = 30,
+    camera_fps: int = 30,
     use_radians: bool = False,
     position_threshold: float = 0.1,
     velocity_threshold: float = 100.0,
@@ -630,7 +630,7 @@ def teleoperate(
     log_states: bool = False,
     log_states_interval: int = 30,
     camera_only: bool = False,
-    camera_twin_uuid: Optional[str] = None,
+    camera_uuid: Optional[str] = None,
     twin: Optional[Twin] = None,
 ) -> None:
     """
@@ -641,11 +641,11 @@ def teleoperate(
 
     Args:
         leader: SO101Leader instance (optional if camera_only=True)
-        client: CyberwaveMQTTClient instance
-        cyberwave_client: Optional Cyberwave client instance (required for camera streaming)
+        cyberwave_client: Cyberwave client instance (required)
         follower: Optional SO101Follower instance (required for camera streaming)
         twin_uuid: UUID of the twin to update
-        fps: Target frames per second for the loop (also used for camera streaming)
+        fps: Target frames per second for the teleoperation loop
+        camera_fps: Frames per second for camera streaming
         use_radians: If True, convert positions to radians; if False, convert to degrees (default)
         position_threshold: Minimum change in position to trigger an update (in degrees/radians)
         velocity_threshold: Minimum change in velocity to trigger an update
@@ -653,6 +653,8 @@ def teleoperate(
         log_states: Whether to log leader/follower states
         log_states_interval: Interval for logging states
         camera_only: If True, only stream camera (skip teleoperation loop)
+        camera_uuid: UUID of the twin to stream camera to (default: same as twin_uuid)
+        twin: Twin instance for updating joint states
     """
     setup_logging()
 
@@ -676,15 +678,14 @@ def teleoperate(
         )
         keyboard_thread.start()
         logger.info("Press 'q' to stop camera streaming")
-
         # Start camera streaming thread
         camera_thread = threading.Thread(
             target=_camera_worker_thread,
-            args=(cyberwave_client, camera_id, fps, twin_uuid, stop_event),
+            args=(cyberwave_client, camera_id, camera_fps, camera_uuid or twin_uuid, stop_event),
             daemon=True,
         )
         camera_thread.start()
-        logger.info(f"Camera streaming started (camera ID: {camera_id}, FPS: {fps})")
+        logger.info(f"Camera streaming started (camera ID: {camera_id}, FPS: {camera_fps})")
         logger.info("Camera streaming active. Press 'q' to stop...")
 
         try:
@@ -705,14 +706,18 @@ def teleoperate(
         return
 
     # Ensure MQTT client is connected
-    if client is not None and not client.connected:
+    if cyberwave_client is None:
+        raise RuntimeError("Cyberwave client is required")
+    
+    mqtt_client = cyberwave_client.mqtt
+    if mqtt_client is not None and not mqtt_client.connected:
         logger.info("Connecting to Cyberwave MQTT broker...")
-        client.connect()
+        mqtt_client.connect()
 
         # Wait for connection with timeout
         max_wait_time = 10.0  # seconds
         wait_start = time.time()
-        while not client.connected:
+        while not mqtt_client.connected:
             if time.time() - wait_start > max_wait_time:
                 raise RuntimeError(
                     f"Failed to connect to Cyberwave MQTT broker within {max_wait_time} seconds"
@@ -794,7 +799,7 @@ def teleoperate(
 
     # Start MQTT update worker thread
     worker_thread = None
-    if client is not None:
+    if twin is not None:
         worker_thread = threading.Thread(
             target=cyberwave_update_worker,
             args=(action_queue, joint_name_to_index, joint_name_to_norm_mode, use_radians, stop_event, twin),
@@ -810,11 +815,11 @@ def teleoperate(
             camera_id = follower.config.cameras[0]
             camera_thread = threading.Thread(
                 target=_camera_worker_thread,
-                args=(cyberwave_client, camera_id, fps, camera_twin_uuid, stop_event),
+                args=(cyberwave_client, camera_id, camera_fps, camera_uuid or twin_uuid, stop_event),
                 daemon=True,
             )
             camera_thread.start()
-            logger.info(f"Started camera streaming thread (camera ID: {camera_id}, FPS: {fps})")
+            logger.info(f"Started camera streaming thread (camera ID: {camera_id}, FPS: {camera_fps})")
         else:
             logger.debug("Follower has no cameras configured, skipping camera streaming")
 
@@ -827,16 +832,17 @@ def teleoperate(
         f"velocity={velocity_threshold}, effort={effort_threshold}"
     )
     try:
-        actions = leader.get_action()
-        actions = {key.removesuffix(".pos"): val for key, val in actions.items() if key.endswith(".pos")}
-        # Use joint_name_to_index to convert actions to joint indexes
-        actions = {joint_name_to_index[key]: val for key, val in actions.items()}
-        # Send actions to Cyberwave as single update
-        client.publish_initial_observation(
-            twin_uuid=twin.uuid,
-            observations=actions,
-        )
-        logger.info(f"Initial observation sent to Cyberwave twin {twin_uuid}, {len(actions)} joints updated")
+        if leader is not None and twin is not None and mqtt_client is not None:
+            actions = leader.get_action()
+            actions = {key.removesuffix(".pos"): val for key, val in actions.items() if key.endswith(".pos")}
+            # Use joint_name_to_index to convert actions to joint indexes
+            actions = {joint_name_to_index[key]: val for key, val in actions.items()}
+            # Send actions to Cyberwave as single update
+            mqtt_client.publish_initial_observation(
+                twin_uuid=twin.uuid,
+                observations=actions,
+            )
+            logger.info(f"Initial observation sent to Cyberwave twin {twin_uuid}, {len(actions)} joints updated")
 
     except Exception as e:
         logger.error(f"Error getting leader actions: {e}", exc_info=True)
@@ -906,12 +912,6 @@ def main():
         description="Teleoperate SO101 leader and update Cyberwave twin"
     )
     parser.add_argument(
-        "--token",
-        type=str,
-        required=False,
-        help="Cyberwave API token",
-    )
-    parser.add_argument(
         "--twin-uuid",
         type=str,
         required=True,
@@ -938,6 +938,7 @@ def main():
     parser.add_argument(
         "--use-radians",
         action="store_true",
+        default=True,
         help="Convert positions to radians (default: degrees)",
     )
     parser.add_argument(
@@ -962,37 +963,30 @@ def main():
     parser.add_argument(
         "--camera-only",
         action="store_true",
-        help="Only stream camera (skip teleoperation loop). Requires --follower-port and --token.",
+        help="Only stream camera (skip teleoperation loop). Requires --follower-port.",
     )
     parser.add_argument(
-        "--camera-twin-uuid",
+        "--camera-uuid",
         type=str,
         required=False,
         help="UUID of the twin to stream camera to (default: same as --twin-uuid)",
     )
     parser.add_argument(
-        "--environment-uuid",
-        type=str,
+        "--camera-fps",
+        type=int,
         required=False,
-        help="Environment UUID to use for the twin",
+        default=30,
+        help="FPS to use for the camera (default: 30)",
     )
+
     args = parser.parse_args()
-    if args.camera_twin_uuid is None:
-        args.camera_twin_uuid = args.twin_uuid
+    if args.camera_uuid is None:
+        args.camera_uuid = args.twin_uuid
     # Initialize Cyberwave client and get MQTT client
-    cyberwave_client = None
-    mqtt_client = None
-    if args.token:
-        cyberwave_client = Cyberwave(token=args.token)
-        twin = cyberwave_client.twin(
-            asset_key="the-robot-studio/so101",
-            environment_id=args.environment_uuid,
-            )
-        mqtt_client = cyberwave_client.mqtt
-        logger.info("Connected to Cyberwave MQTT broker and created twin")
-        logger.info("Started controller")
-    elif args.camera_only:
-        raise RuntimeError("--token is required when using --camera-only")
+    cyberwave_client = Cyberwave()
+    twin = cyberwave_client.twin(asset_key="the-robot-studio/so101", twin_id=args.twin_uuid)
+    mqtt_client = cyberwave_client.mqtt
+    logger.info("Connected to Cyberwave MQTT broker and created twin")
 
     # Initialize leader (optional if camera-only mode)
     leader = None
@@ -1025,16 +1019,16 @@ def main():
     try:
         teleoperate(
             leader=leader,
-            client=mqtt_client,
             cyberwave_client=cyberwave_client,
             follower=follower,
             twin_uuid=args.twin_uuid,
             fps=args.fps,
+            camera_fps=args.camera_fps,
             use_radians=args.use_radians,
             log_states=args.log_states,
             log_states_interval=args.log_states_interval,
             camera_only=args.camera_only,
-            camera_twin_uuid=args.camera_twin_uuid,
+            camera_uuid=args.camera_uuid,
             twin=twin
         )
     finally:
