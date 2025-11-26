@@ -118,30 +118,37 @@ def _camera_worker_thread(
 
             if camera_state["event_loop"] is None:
                 logger.error("Event loop not available, cannot process command")
+                logger.debug(f"Camera state: streamer={camera_state.get('streamer') is not None}, "
+                           f"event_loop={'None' if camera_state['event_loop'] is None else 'set'}")
                 return
 
+            logger.debug(f"Scheduling {command_type} command on event loop")
             if command_type == "start_video":
-                asyncio.run_coroutine_threadsafe(
+                future = asyncio.run_coroutine_threadsafe(
                     _handle_start_video_command(), camera_state["event_loop"]
                 )
+                # Check for exceptions in the coroutine (with timeout)
+                try:
+                    future.result(timeout=10.0)  # Wait up to 10 seconds for completion
+                except Exception as e:
+                    logger.error(f"Error executing start_video command: {e}", exc_info=True)
             elif command_type == "stop_video":
-                asyncio.run_coroutine_threadsafe(
+                future = asyncio.run_coroutine_threadsafe(
                     _handle_stop_video_command(), camera_state["event_loop"]
                 )
+                # Check for exceptions in the coroutine (with timeout)
+                try:
+                    future.result(timeout=10.0)  # Wait up to 10 seconds for completion
+                except Exception as e:
+                    logger.error(f"Error executing stop_video command: {e}", exc_info=True)
             else:
                 logger.warning(f"Unknown command type: {command_type}")
 
         except Exception as e:
             logger.error(f"Error processing command message: {e}", exc_info=True)
 
-    # Subscribe to command messages
-    mqtt_client.subscribe_command_message(twin_uuid, on_command_message)
-
     async def _camera_worker_async() -> None:
         """Async function that handles camera streaming."""
-        # Store event loop reference for command handler
-        camera_state["event_loop"] = asyncio.get_event_loop()
-
         try:
             logger.info("Camera worker async loop started, waiting for commands")
 
@@ -165,9 +172,19 @@ def _camera_worker_thread(
     # Run async function in event loop
     loop = None
     try:
-        # Create new event loop for this thread
+        # Create new event loop for this thread FIRST
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        
+        # Set event loop reference BEFORE subscribing to avoid race condition
+        camera_state["event_loop"] = loop
+        logger.debug("Event loop created and set in camera_state")
+        
+        # Subscribe to command messages AFTER event loop is ready
+        mqtt_client.subscribe_command_message(twin_uuid, on_command_message)
+        logger.info(f"Subscribed to command messages for twin {twin_uuid}")
+        
+        # Now run the async function
         loop.run_until_complete(_camera_worker_async())
     except Exception as e:
         logger.error(f"Error in camera worker thread: {e}", exc_info=True)
@@ -175,6 +192,8 @@ def _camera_worker_thread(
         # Clean up event loop
         if loop is not None:
             try:
+                # Clear event loop reference before closing
+                camera_state["event_loop"] = None
                 loop.close()
             except Exception:
                 pass
