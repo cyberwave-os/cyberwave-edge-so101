@@ -106,7 +106,7 @@ def cyberwave_update_worker(
     use_radians: bool,
     stop_event: threading.Event,
     twin: Optional[Twin] = None,
-    time_reference: TimeReference,
+    time_reference: TimeReference = None,
 ) -> None:
     """
     Worker thread that processes actions from the queue and updates Cyberwave twin.
