@@ -10,7 +10,7 @@ import threading
 import time
 from typing import Dict, Optional
 
-from cyberwave import Cyberwave, Twin
+from cyberwave import Cyberwave, Twin, TimeReference
 
 from follower import SO101Follower
 from leader import SO101Leader
@@ -19,12 +19,14 @@ from utils import setup_logging
 
 logger = logging.getLogger(__name__)
 
+
 def _camera_worker_thread(
     client: Cyberwave,
     camera_id: int,
     fps: int,
     twin_uuid: str,
     stop_event: threading.Event,
+    time_reference: TimeReference
 ) -> None:
     """
     Worker thread that handles camera streaming.
@@ -39,21 +41,25 @@ def _camera_worker_thread(
         fps: Frames per second for camera stream
         twin_uuid: UUID of the twin to stream to
         stop_event: Event to signal thread to stop
+        time_reference: TimeReference instance
+    Returns:
+        None
     """
     logger.debug("Camera worker thread started")
-    
+
     async def _run_camera_streamer():
         """Async function that runs the camera streamer with auto-reconnect."""
         # Create async stop event from threading.Event
         async_stop_event = asyncio.Event()
-        
+
         # Create camera streamer using the SDK API
         streamer = client.video_stream(
             twin_uuid=twin_uuid,
             camera_id=camera_id,
             fps=fps,
+            time_reference=time_reference,
         )
-        
+
         # Monitor the threading stop_event and set async_stop_event
         async def monitor_stop():
             while not stop_event.is_set():
@@ -100,6 +106,7 @@ def cyberwave_update_worker(
     use_radians: bool,
     stop_event: threading.Event,
     twin: Optional[Twin] = None,
+    time_reference: TimeReference,
 ) -> None:
     """
     Worker thread that processes actions from the queue and updates Cyberwave twin.
@@ -115,6 +122,9 @@ def cyberwave_update_worker(
         use_radians: Whether to convert positions to radians (only for DEGREES mode)
         stop_event: Event to signal thread to stop
         twin: Optional Twin instance for updating joint states
+        time_reference: TimeReference instance
+    Returns:
+        None
     """
     logger.debug("Cyberwave update worker thread started")
     processed_count = 0
@@ -404,6 +414,7 @@ def _teleop_loop(
     log_states: bool,
     log_states_interval: int,
     frame_time: float,
+    time_reference: TimeReference,
 ) -> tuple[int, int]:
     """
     Main teleoperation loop: read from leader, send to follower, and queue Cyberwave updates.
@@ -420,7 +431,7 @@ def _teleop_loop(
         log_states: Whether to log leader/follower states
         log_states_interval: Interval for logging states
         frame_time: Target time per frame (1/fps)
-
+        time_reference: TimeReference instance
     Returns:
         Tuple of (update_count, skip_count)
     """
@@ -431,9 +442,9 @@ def _teleop_loop(
     try:
         while not stop_event.is_set():
             loop_start = time.time()
-            
+
             # Generate timestamp for this iteration (before reading action)
-            timestamp = time.time()
+            timestamp, timestamp_monotonic = time_reference.update()
 
             # Read action from leader (normalized positions with .pos suffix)
             action = leader.get_action()
@@ -534,8 +545,6 @@ def teleoperate(
         leader: SO101Leader instance (optional if camera_only=True)
         cyberwave_client: Cyberwave client instance (required)
         follower: Optional SO101Follower instance (required for camera streaming)
-        robot: Robot twin instance
-        camera: Camera twin instance
         fps: Target frames per second for the teleoperation loop
         camera_fps: Frames per second for camera streaming
         use_radians: If True, convert positions to radians; if False, convert to degrees (default)
@@ -544,10 +553,11 @@ def teleoperate(
         effort_threshold: Minimum change in effort to trigger an update
         log_states: Whether to log leader/follower states
         log_states_interval: Interval for logging states
-        camera_only: If True, only stream camera (skip teleoperation loop)
+        robot: Robot twin instance
+        camera: Camera twin instance
     """
     setup_logging()
-
+    time_reference = TimeReference()
     # Ensure MQTT client is connected
     if cyberwave_client is None:
         raise RuntimeError("Cyberwave client is required")
@@ -634,7 +644,7 @@ def teleoperate(
     if robot is not None:
         worker_thread = threading.Thread(
             target=cyberwave_update_worker,
-            args=(action_queue, joint_name_to_index, joint_name_to_norm_mode, use_radians, stop_event, robot),
+            args=(action_queue, joint_name_to_index, joint_name_to_norm_mode, use_radians, stop_event, robot, time_reference),
             daemon=True,
         )
         worker_thread.start()
@@ -647,7 +657,7 @@ def teleoperate(
             camera_id = follower.config.cameras[0]
             camera_thread = threading.Thread(
                 target=_camera_worker_thread,
-                args=(cyberwave_client, camera_id, camera_fps, camera.uuid, stop_event),
+                args=(cyberwave_client, camera_id, camera_fps, camera.uuid, stop_event, time_reference),
                 daemon=True,
             )
             camera_thread.start()
@@ -664,7 +674,7 @@ def teleoperate(
         f"velocity={velocity_threshold}, effort={effort_threshold}"
     )
     try:
-        if leader is not None and robot is not None and mqtt_client is not None:
+        if leader is not None and robot is not None and mqtt_client is not None and time_reference is not None:
             actions = leader.get_action()
             actions = {key.removesuffix(".pos"): val for key, val in actions.items() if key.endswith(".pos")}
             # Use joint_name_to_index to convert actions to joint indexes
@@ -672,6 +682,7 @@ def teleoperate(
             # Send actions to Cyberwave as single update
             mqtt_client.publish_initial_observation(
                 twin_uuid=robot.uuid,
+                time_reference=time_reference,
                 observations=actions,
             )
             logger.info(f"Initial observation sent to Cyberwave twin {robot.uuid}, {len(actions)} joints updated")
@@ -693,6 +704,7 @@ def teleoperate(
                 log_states=log_states,
                 log_states_interval=log_states_interval,
                 frame_time=frame_time,
+                time_reference=time_reference,
             )
         else:
             # No leader, just wait for stop event
