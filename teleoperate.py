@@ -683,7 +683,7 @@ def teleoperate(
             # Send actions to Cyberwave as single update
             mqtt_client.publish_initial_observation(
                 twin_uuid=robot.uuid,
-                time_reference=time_reference,
+                timestamp=time.time(),
                 observations=actions,
             )
             logger.info(f"Initial observation sent to Cyberwave twin {robot.uuid}, {len(actions)} joints updated")
