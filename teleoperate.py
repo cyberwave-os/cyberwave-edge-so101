@@ -10,7 +10,8 @@ import threading
 import time
 from typing import Dict, Optional
 
-from cyberwave import Cyberwave, Twin, TimeReference
+from cyberwave import Cyberwave, Twin
+from cyberwave.utils import TimeReference
 
 from follower import SO101Follower
 from leader import SO101Leader
