@@ -38,7 +38,33 @@ pip install -e .
 - `feetech-servo-sdk` - Feetech motor SDK
 - `cyberwave` - Cyberwave platform integration (for teleoperation)
 
+### Environment Variables
+
+For Cyberwave integration, set the following environment variables:
+
+```bash
+export CYBERWAVE_TOKEN=your_token_here
+export CYBERWAVE_ENVIRONMENT_ID=your_environment_uuid  # Optional
+```
+
+You can add these to your `~/.bashrc` or `~/.zshrc` to make them persistent:
+
+```bash
+echo 'export CYBERWAVE_TOKEN=your_token_here' >> ~/.bashrc
+echo 'export CYBERWAVE_ENVIRONMENT_ID=your_environment_uuid' >> ~/.bashrc
+source ~/.bashrc
+```
+
 ## Quick Start
+
+### 0. Set Up Environment Variables
+
+Before using Cyberwave integration, set your API token and optionally environment UUID:
+
+```bash
+export CYBERWAVE_TOKEN=your_token_here
+export CYBERWAVE_ENVIRONMENT_ID=your_environment_uuid  # Optional
+```
 
 ### 1. Find Device Port
 
@@ -75,7 +101,6 @@ so101-calibrate --type follower --port /dev/tty.usbmodem456 --id follower1
 
 ```bash
 so101-teleoperate \
-    --token YOUR_CYBERWAVE_TOKEN \
     --twin-uuid YOUR_TWIN_UUID \
     --leader-port /dev/tty.usbmodem123 \
     --fps 30
@@ -139,23 +164,32 @@ so101-calibrate --type leader --port /dev/tty.usbmodem123 --id leader1 --voltage
 
 Run teleoperation loop with Cyberwave integration.
 
+**Note:** Requires `CYBERWAVE_TOKEN` environment variable to be set.
+
 ```bash
+# Set environment variable first
+export CYBERWAVE_TOKEN=your_token_here
+
+# Run teleoperation
 so101-teleoperate \
-    --token YOUR_CYBERWAVE_TOKEN \
     --twin-uuid YOUR_TWIN_UUID \
     --leader-port /dev/tty.usbmodem123 \
     --fps 30 \
+    --camera-fps 30 \
     --use-radians
 ```
 
 **Options:**
-- `--token`: Cyberwave API token (required)
 - `--twin-uuid`: UUID of the Cyberwave twin to update (required)
-- `--leader-port`: Serial port for leader device (required)
+- `--leader-port`: Serial port for leader device (required, unless using --camera-only)
 - `--follower-port`: Optional serial port for follower device
-- `--fps`: Target frames per second (default: 30)
-- `--use-radians`: Convert positions to radians instead of degrees
-- `--display-observation`: Display follower observations
+- `--fps`: Target frames per second for teleoperation loop (default: 30)
+- `--camera-fps`: Frames per second for camera streaming (default: 30)
+- `--camera-uuid`: UUID of the twin to stream camera to (default: same as --twin-uuid)
+- `--use-radians`: Convert positions to radians instead of degrees (default: True)
+- `--camera-only`: Only stream camera, skip teleoperation loop (requires --follower-port)
+- `--log-states`: Enable logging of leader and follower states
+- `--log-states-interval`: Log states every N updates (default: 30)
 
 ## Python API
 
@@ -209,9 +243,9 @@ from config import LeaderConfig, FollowerConfig
 from teleoperate import teleoperate
 from cyberwave import Cyberwave
 
-# Initialize Cyberwave client
-cyberwave_client = Cyberwave(token="YOUR_TOKEN")
-mqtt_client = cyberwave_client.mqtt
+# Initialize Cyberwave client (reads token from CYBERWAVE_TOKEN env var)
+cyberwave_client = Cyberwave()
+twin = cyberwave_client.twin(asset_key="the-robot-studio/so101", twin_id="YOUR_TWIN_UUID")
 
 # Initialize leader
 leader_config = LeaderConfig(port="/dev/tty.usbmodem123", id="leader1")
@@ -227,17 +261,19 @@ follower.connect()
 try:
     teleoperate(
         leader=leader,
-        client=mqtt_client,
+        cyberwave_client=cyberwave_client,
         twin_uuid="YOUR_TWIN_UUID",
         follower=follower,  # Optional
         fps=30,
-        use_radians=False,
+        camera_fps=30,  # Separate FPS for camera streaming
+        use_radians=True,  # Default is True
+        twin=twin,
     )
 finally:
     leader.disconnect()
     if follower:
         follower.disconnect()
-    mqtt_client.disconnect()
+    cyberwave_client.disconnect()
 ```
 
 ## Calibration Format
@@ -383,6 +419,20 @@ Run calibration first:
 ```bash
 so101-calibrate --type leader --port /dev/tty.usbmodem123 --id leader1
 ```
+
+### Environment Variables Not Set
+
+If you see errors about missing Cyberwave token:
+```
+ValueError: No CYBERWAVE_API_KEY found! Get yours at https://cyberwave.com/profile
+```
+
+Set the required environment variable:
+```bash
+export CYBERWAVE_API_KEY=your_token_here
+```
+
+Get your token from [https://cyberwave.com/profile](https://cyberwave.com/profile)
 
 ### Voltage Detection
 
