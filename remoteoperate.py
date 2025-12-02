@@ -1,6 +1,7 @@
 """Remote operation loop for SO101 follower via Cyberwave MQTT."""
 
 import argparse
+import asyncio
 import logging
 import math
 import queue
@@ -8,9 +9,10 @@ import select
 import sys
 import threading
 import time
-from typing import Dict
+from typing import Dict, Optional
 
-from cyberwave import Cyberwave
+from cyberwave import Cyberwave, Twin
+from cyberwave.utils import TimeReference
 
 from follower import SO101Follower
 from motors import MotorNormMode
@@ -18,6 +20,84 @@ from utils import setup_logging
 from write_position import validate_position
 
 logger = logging.getLogger(__name__)
+
+
+def _camera_worker_thread(
+    client: Cyberwave,
+    camera_id: int,
+    fps: int,
+    twin_uuid: str,
+    stop_event: threading.Event,
+    time_reference: TimeReference
+) -> None:
+    """
+    Worker thread that handles camera streaming.
+
+    Runs an async event loop in a separate thread to handle camera streaming.
+    Uses CameraStreamer.run_with_auto_reconnect() for automatic command handling
+    and reconnection.
+
+    Args:
+        client: Cyberwave client instance
+        camera_id: Camera index to stream
+        fps: Frames per second for camera stream
+        twin_uuid: UUID of the twin to stream to
+        stop_event: Event to signal thread to stop
+        time_reference: TimeReference instance
+    Returns:
+        None
+    """
+    logger.debug("Camera worker thread started")
+
+    async def _run_camera_streamer():
+        """Async function that runs the camera streamer with auto-reconnect."""
+        # Create async stop event from threading.Event
+        async_stop_event = asyncio.Event()
+
+        # Create camera streamer using the SDK API
+        streamer = client.video_stream(
+            twin_uuid=twin_uuid,
+            camera_id=camera_id,
+            fps=fps,
+            time_reference=time_reference,
+        )
+
+        # Monitor the threading stop_event and set async_stop_event
+        async def monitor_stop():
+            while not stop_event.is_set():
+                await asyncio.sleep(0.1)
+            async_stop_event.set()
+
+        # Start the monitor task
+        monitor_task = asyncio.create_task(monitor_stop())
+
+        try:
+            # Run with auto-reconnect - this handles all command subscriptions internally
+            await streamer.run_with_auto_reconnect(
+                stop_event=async_stop_event,
+                command_callback=lambda status, msg: logger.info(f"Camera command: {status} - {msg}"),
+            )
+        finally:
+            monitor_task.cancel()
+            try:
+                await monitor_task
+            except asyncio.CancelledError:
+                pass
+
+    # Run async function in event loop
+    loop = None
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_run_camera_streamer())
+    except Exception as e:
+        logger.error(f"Error in camera worker thread: {e}", exc_info=True)
+    finally:
+        if loop is not None:
+            try:
+                loop.close()
+            except Exception as e:
+                logger.error(f"Error closing event loop: {e}", exc_info=True)
 
 
 def _radians_to_normalized(radians: float, norm_mode: MotorNormMode) -> float:
@@ -350,21 +430,31 @@ def _create_joint_state_callback(
 
 
 def remoteoperate(
-    twin_uuid: str,
     client: Cyberwave,
     follower: SO101Follower,
+    robot: Optional[Twin] = None,
+    camera: Optional[Twin] = None,
     fps: int = 30,
+    camera_fps: int = 30,
 ) -> None:
     """
     Run remote operation loop: receive joint states via MQTT and write to follower motors.
 
     Args:
-        twin_uuid: UUID of the twin to subscribe to
         client: Cyberwave client instance
         follower: SO101Follower instance
+        robot: Robot twin instance
+        camera: Camera twin instance
         fps: Target frames per second (not used directly, but kept for compatibility)
+        camera_fps: Frames per second for camera streaming
     """
     setup_logging()
+    time_reference = TimeReference()
+
+    # Get twin_uuid from robot twin
+    if robot is None:
+        raise RuntimeError("Robot twin is required")
+    twin_uuid = robot.uuid
 
     # Ensure follower is connected
     if not follower.connected:
@@ -419,12 +509,13 @@ def remoteoperate(
             time.sleep(0.1)
         logger.info("Connected to Cyberwave MQTT broker")
 
-    # Send initial observation to Cyberwave as individual MQTT messages
+    # Send initial observation to Cyberwave using publish_initial_observation
     try:
         # Get follower's current observation (normalized positions)
         follower_obs = follower.get_observation()
 
-        # Convert to joint index format and send each as individual MQTT message
+        # Convert to joint index format for initial observation
+        observations = {}
         for joint_key, normalized_pos in follower_obs.items():
             # Remove .pos suffix if present
             name = joint_key.removesuffix(".pos")
@@ -440,16 +531,14 @@ def remoteoperate(
                     radians = degrees * math.pi / 180.0
                 else:
                     radians = normalized_pos * math.pi / 180.0  # Assume degrees
-                # Send individual joint state update
-                mqtt_client.update_joint_state(
-                    twin_uuid=twin_uuid,
-                    joint_name=str(joint_index),
-                    position=radians,
-                    velocity=0.0,
-                    effort=0.0,
-                )
+                observations[joint_index] = radians
 
-        logger.info(f"Initial observation sent to Cyberwave twin {twin_uuid}, {len(follower_obs)} joints updated")
+        # Send initial observation as single update
+        mqtt_client.publish_initial_observation(
+            twin_uuid=twin_uuid,
+            observations=observations,
+        )
+        logger.info(f"Initial observation sent to Cyberwave twin {twin_uuid}, {len(observations)} joints updated")
 
     except Exception as e:
         logger.error(f"Error sending initial observation: {e}", exc_info=True)
@@ -467,6 +556,20 @@ def remoteoperate(
     )
     keyboard_thread.start()
     logger.info("Press 'q' to stop remote operation")
+
+    # Start camera streaming thread if follower has cameras configured and camera twin is provided
+    camera_thread = None
+    if follower.config.cameras and len(follower.config.cameras) > 0 and camera is not None:
+        camera_id = follower.config.cameras[0]
+        camera_thread = threading.Thread(
+            target=_camera_worker_thread,
+            args=(client, camera_id, camera_fps, camera.uuid, stop_event, time_reference),
+            daemon=True,
+        )
+        camera_thread.start()
+        logger.info(f"Started camera streaming thread (camera ID: {camera_id}, FPS: {camera_fps})")
+    elif camera is not None:
+        logger.debug("Follower has no cameras configured, skipping camera streaming")
 
     # Create callback for joint state updates
     joint_state_callback = _create_joint_state_callback(
@@ -517,6 +620,15 @@ def remoteoperate(
         else:
             logger.info("Motor writer thread stopped successfully")
 
+        # Stop camera streaming thread
+        if camera_thread is not None:
+            logger.info("Stopping camera streaming thread...")
+            camera_thread.join(timeout=5.0)
+            if camera_thread.is_alive():
+                logger.warning("Camera streaming thread did not stop in time")
+            else:
+                logger.info("Camera streaming thread stopped successfully")
+
         logger.info("Remote operation loop ended")
 
 
@@ -526,15 +638,9 @@ def main():
         description="Remote operate SO101 follower via Cyberwave MQTT"
     )
     parser.add_argument(
-        "--token",
-        type=str,
-        required=True,
-        help="Cyberwave API token",
-    )
-    parser.add_argument(
         "--twin-uuid",
         type=str,
-        required=True,
+        required=False,
         help="UUID of the twin to subscribe to",
     )
     parser.add_argument(
@@ -557,10 +663,17 @@ def main():
         help="Device identifier for calibration file (default: 'follower1')",
     )
     parser.add_argument(
-        "--environment-uuid",
+        "--camera-uuid",
         type=str,
         required=False,
-        help="Environment UUID to use for the twin",
+        help="UUID of the twin to stream camera to (default: same as --twin-uuid)",
+    )
+    parser.add_argument(
+        "--camera-fps",
+        type=int,
+        required=False,
+        default=30,
+        help="FPS to use for the camera (default: 30)",
     )
     parser.add_argument(
         "--verbose",
@@ -570,6 +683,10 @@ def main():
 
     args = parser.parse_args()
 
+    # Default camera-uuid to twin-uuid if not provided
+    if args.camera_uuid is None:
+        args.camera_uuid = args.twin_uuid
+
     # Setup logging
     log_level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(
@@ -578,9 +695,11 @@ def main():
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # Initialize Cyberwave client
-    cyberwave_client = Cyberwave(token=args.token)
-    logger.info("Initialized Cyberwave client")
+    # Initialize Cyberwave client and create twins
+    cyberwave_client = Cyberwave()
+    robot = cyberwave_client.twin(asset_key="the-robot-studio/so101", twin_id=args.twin_uuid)
+    camera = cyberwave_client.twin(asset_key="cyberwave/standard-cam", twin_id=args.camera_uuid)
+    logger.info("Connected to Cyberwave MQTT broker and created twins")
 
     # Initialize follower
     from config import FollowerConfig
@@ -589,15 +708,18 @@ def main():
         port=args.follower_port,
         max_relative_target=args.max_relative_target,
         id=args.follower_id,
+        cameras=[0],  # Enable camera support
     )
     follower = SO101Follower(config=follower_config)
     follower.connect()
 
     try:
         remoteoperate(
-            twin_uuid=args.twin_uuid,
             client=cyberwave_client,
             follower=follower,
+            robot=robot,
+            camera=camera,
+            camera_fps=args.camera_fps,
         )
     except Exception as e:
         logger.error(f"Error in remoteoperate: {e}", exc_info=True)
