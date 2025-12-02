@@ -181,9 +181,10 @@ def _motor_writer_worker(
         follower: SO101Follower instance
         stop_event: Event to signal thread to stop
     """
-    logger.debug("Motor writer worker thread started")
+    logger.info("Motor writer worker thread started")
     processed_count = 0
     error_count = 0
+    actions_received = 0
     from utils import ensure_safe_goal_position
 
     while not stop_event.is_set():
@@ -191,6 +192,12 @@ def _motor_writer_worker(
             # Get action from queue with timeout
             try:
                 action = action_queue.get(timeout=0.1)
+                actions_received += 1
+                logger.debug(
+                    f"[MOTOR WRITER] Received action #{actions_received} from queue "
+                    f"(queue size now: {action_queue.qsize()})"
+                )
+                logger.debug(f"[MOTOR WRITER] Action data: {action}")
             except queue.Empty:
                 continue
 
@@ -287,21 +294,36 @@ def _motor_writer_worker(
                         # The motors will catch up naturally
                 else:
                     # No max_relative_target limit, send action directly
-                    follower.send_action(action)
+                    logger.debug(f"[MOTOR WRITER] Sending action directly (no max_relative_target): {action}")
+                    sent_action = follower.send_action(action)
                     processed_count += 1
-                    logger.debug(f"Sent action to follower: {action}")
+                    logger.debug(
+                        f"[MOTOR WRITER] Action sent successfully #{processed_count}. "
+                        f"Sent: {sent_action}"
+                    )
 
             except Exception as e:
                 error_count += 1
-                logger.error(f"Error sending action to follower: {e}", exc_info=True)
+                logger.error(
+                    f"[MOTOR WRITER] Error sending action to follower (error #{error_count}): {e}",
+                    exc_info=True
+                )
             finally:
                 action_queue.task_done()
+                # Periodic summary
+                if actions_received % 5 == 0:
+                    logger.info(
+                        f"[MOTOR WRITER STATS] Received: {actions_received}, "
+                        f"Processed: {processed_count}, Errors: {error_count}, "
+                        f"Queue size: {action_queue.qsize()}"
+                    )
 
         except Exception as e:
-            logger.error(f"Error in motor writer worker: {e}", exc_info=True)
+            logger.error(f"[MOTOR WRITER] Error in worker loop: {e}", exc_info=True)
 
     logger.info(
-        f"Motor writer worker stopped. Processed: {processed_count}, Errors: {error_count}"
+        f"[MOTOR WRITER] Worker stopped. Total received: {actions_received}, "
+        f"Processed: {processed_count}, Errors: {error_count}"
     )
 
 
@@ -325,6 +347,9 @@ def _create_joint_state_callback(
     Returns:
         Callback function for MQTT joint state updates
     """
+    # Track message count for debugging
+    message_count = {"total": 0, "processed": 0, "filtered": 0, "invalid": 0, "queued": 0}
+
     def callback(topic: str, data: Dict) -> None:
         """
         Callback function for MQTT joint state updates.
@@ -334,13 +359,20 @@ def _create_joint_state_callback(
             data: Dictionary containing joint state update
                   Expected format: {"joint_name": "5", "joint_state": {"position": -1.22, "velocity": 0, "effort": 0}, "timestamp": ...}
         """
+        message_count["total"] += 1
         try:
+            # Log every message received (even if filtered)
+            logger.debug(f"[MSG #{message_count['total']}] Received on topic: {topic}")
+            logger.debug(f"[MSG #{message_count['total']}] Raw data: {data}")
+
             # Check if topic ends with "update" - only process update messages
             if not topic.endswith("/update"):
-                logger.debug(f"Ignoring message on topic {topic} (not an update message)")
+                message_count["filtered"] += 1
+                logger.debug(f"[MSG #{message_count['total']}] FILTERED - topic does not end with '/update'")
                 return
 
-            logger.debug(f"Received joint state update on topic {topic}: {data}")
+            message_count["processed"] += 1
+            logger.debug(f"[MSG #{message_count['total']}] Processing message (processed: {message_count['processed']})")
 
             # Extract joint index/name and position from data
             # Message format:
@@ -395,13 +427,22 @@ def _create_joint_state_callback(
 
             # Convert radians to normalized position
             normalized_position = _radians_to_normalized(position_radians, norm_mode)
+            logger.debug(
+                f"[MSG #{message_count['total']}] Conversion: {position_radians:.4f} rad -> "
+                f"{normalized_position:.2f} normalized (mode: {norm_mode})"
+            )
 
             # Validate position
             motor_id = follower.motors[joint_name].id
             is_valid, error_msg = validate_position(motor_id, normalized_position)
             if not is_valid:
-                logger.warning(f"Invalid position for {joint_name}: {error_msg}")
+                message_count["invalid"] += 1
+                logger.warning(
+                    f"[MSG #{message_count['total']}] INVALID position for {joint_name} (motor {motor_id}): "
+                    f"{error_msg} (invalid count: {message_count['invalid']})"
+                )
                 return
+            logger.debug(f"[MSG #{message_count['total']}] Position validated OK for {joint_name}")
 
             # Update current state (merge with previous state)
             # Create full action state by taking current state and updating the changed joint
@@ -412,19 +453,30 @@ def _create_joint_state_callback(
 
             # Put action in queue (non-blocking)
             try:
+                queue_size_before = action_queue.qsize()
                 action_queue.put_nowait(action)
+                message_count["queued"] += 1
                 logger.debug(
-                    f"Queued action for {joint_name}: {normalized_position:.2f} "
-                    f"(from {position_radians:.4f} radians)"
+                    f"[MSG #{message_count['total']}] QUEUED action for {joint_name}: "
+                    f"{normalized_position:.2f} (from {position_radians:.4f} rad) "
+                    f"[queue size: {queue_size_before} -> {action_queue.qsize()}, total queued: {message_count['queued']}]"
                 )
             except queue.Full:
                 logger.warning(
-                    f"Action queue full, dropping update for {joint_name}. "
-                    "Consider increasing queue size."
+                    f"[MSG #{message_count['total']}] QUEUE FULL - dropping update for {joint_name}. "
+                    f"Queue size: {action_queue.qsize()}"
                 )
 
         except Exception as e:
-            logger.error(f"Error processing joint state update: {e}", exc_info=True)
+            logger.error(f"[MSG #{message_count['total']}] Error processing joint state update: {e}", exc_info=True)
+
+        # Periodic summary logging
+        if message_count["total"] % 10 == 0:
+            logger.info(
+                f"[CALLBACK STATS] Total: {message_count['total']}, Processed: {message_count['processed']}, "
+                f"Filtered: {message_count['filtered']}, Invalid: {message_count['invalid']}, "
+                f"Queued: {message_count['queued']}, Queue size: {action_queue.qsize()}"
+            )
 
     return callback
 
@@ -572,6 +624,9 @@ def remoteoperate(
         logger.debug("Follower has no cameras configured, skipping camera streaming")
 
     # Create callback for joint state updates
+    logger.info("Creating joint state callback with mappings:")
+    logger.info(f"  joint_index_to_name: {joint_index_to_name}")
+    logger.info(f"  joint_name_to_norm_mode: {joint_name_to_norm_mode}")
     joint_state_callback = _create_joint_state_callback(
         current_state=current_state,
         action_queue=action_queue,
@@ -581,9 +636,12 @@ def remoteoperate(
     )
 
     # Subscribe to joint states
+    # The topic pattern is: {prefix}cyberwave/joint/{twin_uuid}/+
+    # Messages should come on topics like: cyberwave/joint/{twin_uuid}/update
     logger.info(f"Subscribing to joint states for twin {twin_uuid}...")
+    logger.info(f"  Expected topic pattern: cyberwave/joint/{twin_uuid}/+")
     mqtt_client.subscribe_joint_states(twin_uuid, joint_state_callback)
-    logger.info("Subscribed to joint states")
+    logger.info("Subscribed to joint states - waiting for messages...")
 
     # Start motor writer worker thread
     writer_thread = threading.Thread(
