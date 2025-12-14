@@ -200,7 +200,9 @@ def write_position(
 
         # Wait for position if requested
         if wait_for_position:
-            logger.info(f"Waiting for motor to reach position {target_pos:.2f} (tolerance: {tolerance:.2f})...")
+            logger.info(
+                f"Waiting for motor to reach position {target_pos:.2f} (tolerance: {tolerance:.2f})..."
+            )
             start_time = time.time()
             while time.time() - start_time < timeout:
                 current_obs = device.get_observation()
@@ -402,4 +404,3 @@ Motor IDs:
 
 if __name__ == "__main__":
     main()
-

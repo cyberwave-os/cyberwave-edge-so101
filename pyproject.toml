@@ -47,6 +47,7 @@ dev = [
 [project.scripts]
 so101-find-port = "find_port:main"
 so101-read-device = "read_device:main"
+so101-rich-read-device = "rich_read_device:main"
 so101-calibrate = "calibrate:main"
 so101-teleoperate = "teleoperate:main"
 so101-write-position = "write_position:main"

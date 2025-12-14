@@ -80,9 +80,7 @@ class SO101Leader:
             return
 
         # Load calibration if available (before initializing bus)
-        calibration_path = (
-            self.config.calibration_dir / f"{self.config.id}.json"
-        )
+        calibration_path = self.config.calibration_dir / f"{self.config.id}.json"
         if calibration_path.exists():
             logger.info(f"Loading calibration from {calibration_path}")
             calib_data = load_calibration(calibration_path)
@@ -94,7 +92,9 @@ class SO101Leader:
             self.calibration = None
 
         # Initialize motor bus with calibration
-        self.bus = FeetechMotorsBus(port=self.config.port, motors=self.motors, calibration=self.calibration)
+        self.bus = FeetechMotorsBus(
+            port=self.config.port, motors=self.motors, calibration=self.calibration
+        )
         self.bus.connect()
 
         # Calibrate if requested
@@ -262,4 +262,3 @@ class SO101Leader:
         """Save current calibration to file."""
         self._save_calibration()
         logger.info(f"Calibration saved to {self.calibration_fpath}")
-

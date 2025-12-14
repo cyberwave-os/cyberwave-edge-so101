@@ -47,4 +47,3 @@ def decode_sign_magnitude(encoded: int, sign_bit: int = 15) -> int:
         return -(encoded & magnitude_mask)
     # Sign bit is clear, value is positive
     return encoded & magnitude_mask
-

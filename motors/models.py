@@ -39,4 +39,3 @@ class MotorCalibration:
     homing_offset: float
     range_min: float
     range_max: float
-

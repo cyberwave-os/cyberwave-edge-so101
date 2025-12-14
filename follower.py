@@ -68,7 +68,9 @@ class SO101Follower:
             )
 
         # Determine normalization mode based on config
-        norm_mode_body = MotorNormMode.DEGREES if self.config.use_degrees else MotorNormMode.RANGE_M100_100
+        norm_mode_body = (
+            MotorNormMode.DEGREES if self.config.use_degrees else MotorNormMode.RANGE_M100_100
+        )
 
         # Create motors dict with appropriate normalization modes
         self.motors = {
@@ -229,7 +231,9 @@ class SO101Follower:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
         # Extract goal positions (handle .pos suffix)
-        goal_pos = {key.removesuffix(".pos"): val for key, val in action.items() if key.endswith(".pos")}
+        goal_pos = {
+            key.removesuffix(".pos"): val for key, val in action.items() if key.endswith(".pos")
+        }
         # Also handle keys without .pos suffix
         for key, val in action.items():
             if not key.endswith(".pos") and key in self.motors:
@@ -241,6 +245,7 @@ class SO101Follower:
             present_pos = self.bus.sync_read("Present_Position", normalize=True)
             goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in goal_pos.items()}
             from utils import ensure_safe_goal_position
+
             goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
 
         # Send goal position to the arm (bus handles normalization automatically)

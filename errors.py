@@ -11,4 +11,3 @@ class DeviceAlreadyConnectedError(Exception):
     """Raised when attempting to connect a device that is already connected."""
 
     pass
-

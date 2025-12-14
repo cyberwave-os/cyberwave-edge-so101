@@ -32,7 +32,9 @@ class FollowerConfig:
     use_degrees: bool = False
     id: str = "follower1"
     calibration_dir: Optional[Path] = None
-    max_relative_target: Optional[float] = None  # Maximum change per update (raw encoder units), None to disable safety limit
+    max_relative_target: Optional[float] = (
+        None  # Maximum change per update (raw encoder units), None to disable safety limit
+    )
     cameras: Optional[int] = None
     voltage_rating: Optional[VoltageRating] = None  # 5V or 12V, None for auto-detect
 
@@ -40,7 +42,6 @@ class FollowerConfig:
         """Set default calibration directory if not provided."""
         if self.calibration_dir is None:
             self.calibration_dir = Path.home() / ".so101_lib" / "calibrations"
-
 
 
 # {

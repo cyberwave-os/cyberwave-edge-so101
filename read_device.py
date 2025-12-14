@@ -216,7 +216,9 @@ def format_motor_data(
     lines.append("=" * 80)
 
     for motor_id, data in sorted(motor_data.items()):
-        motor_name = motor_names.get(motor_id, f"Motor {motor_id}") if motor_names else f"Motor {motor_id}"
+        motor_name = (
+            motor_names.get(motor_id, f"Motor {motor_id}") if motor_names else f"Motor {motor_id}"
+        )
         lines.append(f"\n{motor_name} (ID: {motor_id})")
         lines.append("-" * 80)
 
@@ -255,7 +257,9 @@ def format_motor_data(
                 lines.append("    ⚠️  WARNING: Voltage reading seems unusually high!")
                 lines.append("    This might indicate a measurement error or wrong register.")
                 if "voltage_raw" in data:
-                    lines.append(f"    Raw value: {data['voltage_raw']} (if > 255, register might be wrong)")
+                    lines.append(
+                        f"    Raw value: {data['voltage_raw']} (if > 255, register might be wrong)"
+                    )
 
         if "max_limit_voltage" in data or "min_limit_voltage" in data:
             voltage_range = []
@@ -285,9 +289,7 @@ def format_motor_data(
 
 def main():
     """Main entry point for read_device script."""
-    parser = argparse.ArgumentParser(
-        description="Read and display data from SO101 device motors"
-    )
+    parser = argparse.ArgumentParser(description="Read and display data from SO101 device motors")
     parser.add_argument(
         "--port",
         type=str,
@@ -310,11 +312,7 @@ def main():
         default=1000000,
         help="Serial communication baudrate (default: 1000000)",
     )
-    parser.add_argument(
-        "--continuous",
-        action="store_true",
-        help="Continuously read and display data (press Ctrl+C to stop)",
-    )
+    # --continuous removed: this script now performs a single read
     parser.add_argument(
         "--interval",
         type=float,
@@ -372,41 +370,27 @@ def main():
     voltage_rating = args.voltage_rating
     if voltage_rating is None:
         print("Attempting to detect voltage rating...")
-        voltage_rating = detect_voltage_rating(port, motor_ids[0] if motor_ids else 1, args.baudrate)
+        voltage_rating = detect_voltage_rating(
+            port, motor_ids[0] if motor_ids else 1, args.baudrate
+        )
         if voltage_rating:
             print(f"Detected voltage rating: {voltage_rating}V")
         else:
             print("Could not detect voltage rating. Use --voltage-rating to specify (5 or 12).")
 
     try:
-        if args.continuous:
-            print(f"Reading from {port} (press Ctrl+C to stop)...\n")
-            try:
-                while True:
-                    # Clear screen (works on most terminals)
-                    print("\033[2J\033[H", end="")
-
-                    motor_data = read_motor_data(port, motor_ids, args.baudrate)
-                    output = format_motor_data(motor_data, motor_names, voltage_rating, args.show_raw)
-                    print(output)
-                    print(f"\nLast update: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-                    print(f"Update interval: {args.interval}s")
-
-                    time.sleep(args.interval)
-            except KeyboardInterrupt:
-                print("\n\nStopped by user.")
-        else:
-            motor_data = read_motor_data(port, motor_ids, args.baudrate)
-            output = format_motor_data(motor_data, motor_names, voltage_rating, args.show_raw)
-            print(output)
+        # Single-shot read (continuous option removed).
+        motor_data = read_motor_data(port, motor_ids, args.baudrate)
+        output = format_motor_data(motor_data, motor_names, voltage_rating, args.show_raw)
+        print(output)
 
     except Exception as e:
         print(f"Error reading device: {e}", file=sys.stderr)
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
-

@@ -72,7 +72,9 @@ def ensure_safe_goal_position(
             raise ValueError("max_relative_target keys must match those of goal_present_pos.")
         diff_cap = max_relative_target
     else:
-        raise TypeError(f"max_relative_target must be float or dict, got {type(max_relative_target)}")
+        raise TypeError(
+            f"max_relative_target must be float or dict, got {type(max_relative_target)}"
+        )
 
     warnings_dict = {}
     safe_goal_positions = {}
@@ -167,9 +169,7 @@ def test_device_connection(
     try:
         from scservo_sdk import PacketHandler, PortHandler
     except ImportError:
-        logger.warning(
-            "scservo_sdk not available, cannot test device connection"
-        )
+        logger.warning("scservo_sdk not available, cannot test device connection")
         return False
 
     port_handler = None
@@ -192,9 +192,7 @@ def test_device_connection(
         for motor_id in test_ids:
             try:
                 # Try reading model number (address 0-1) as a simple test
-                model_l, result, error = packet_handler.read1ByteTxRx(
-                    port_handler, motor_id, 0
-                )
+                model_l, result, error = packet_handler.read1ByteTxRx(port_handler, motor_id, 0)
                 if result == 0:  # Success
                     return True
             except Exception:
@@ -243,18 +241,12 @@ def find_port() -> str:
         print("Reconnect the USB cable.")
         return port
     elif len(ports_diff) == 0:
-        raise OSError(
-            f"Could not detect the port. No difference was found ({ports_diff})."
-        )
+        raise OSError(f"Could not detect the port. No difference was found ({ports_diff}).")
     else:
-        raise OSError(
-            f"Could not detect the port. More than one port was found ({ports_diff})."
-        )
+        raise OSError(f"Could not detect the port. More than one port was found ({ports_diff}).")
 
 
-def detect_voltage_rating(
-    port: str, motor_id: int = 1, baudrate: int = 1000000
-) -> Optional[int]:
+def detect_voltage_rating(port: str, motor_id: int = 1, baudrate: int = 1000000) -> Optional[int]:
     """
     Attempt to detect the voltage rating (5V or 12V) from the device.
 
@@ -343,6 +335,7 @@ def detect_voltage_rating(
             except Exception:
                 pass
 
+
 def get_cyberwave_controller(token: str, twin_uuid: str) -> EdgeController:
     client = cw(token=token)
     controller = client.controller(twin_uuid=twin_uuid)
@@ -401,7 +394,7 @@ def convert_position_with_calibration(
     if range_max_raw == range_min_raw:
         raise ValueError(f"Invalid calibration for joint '{joint_name}': min and max are equal.")
 
-    # Clamp raw position to [min_, max_] FIRST 
+    # Clamp raw position to [min_, max_] FIRST
     bounded_val = min(range_max_raw, max(range_min_raw, raw_position))
     # logger.info(f"Joint {joint_name}: Bounded value: {bounded_val}, range_min_raw: {range_min_raw}, range_max_raw: {range_max_raw}")
     # Convert based on normalization mode

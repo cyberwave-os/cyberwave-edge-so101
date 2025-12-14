@@ -82,4 +82,3 @@ TORQUE_DISABLE = 0
 # Different registers use different bits for sign encoding
 ENCODING_BIT_HOMING_OFFSET = 11  # Bit 11 for Homing_Offset
 ENCODING_BIT_VELOCITY = 15  # Bit 15 for Goal_Velocity and Present_Velocity
-

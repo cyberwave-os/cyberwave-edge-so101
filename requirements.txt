@@ -12,3 +12,6 @@ six==1.17.0
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 urllib3==2.5.0
+
+# Optional for improved interactive input handling
+prompt_toolkit>=3.0
