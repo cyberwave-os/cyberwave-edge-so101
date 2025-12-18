@@ -33,6 +33,7 @@ dependencies = [
     "pyserial>=3.5",
     "feetech-servo-sdk",
     "cyberwave[camera]>=0.2.12",
+    "python-dotenv>=1.0.0",
 ]
 
 [project.optional-dependencies]

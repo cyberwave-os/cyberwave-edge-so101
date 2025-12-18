@@ -15,12 +15,14 @@ from config import FollowerConfig, LeaderConfig
 from follower import SO101Follower
 from leader import SO101Leader
 from utils import find_port, setup_logging
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
 
 def main():
     """Main entry point for calibration script."""
+    load_dotenv()
     parser = argparse.ArgumentParser(
         description="Calibrate SO101 leader or follower device",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -189,4 +191,3 @@ Examples:
 
 if __name__ == "__main__":
     main()
-

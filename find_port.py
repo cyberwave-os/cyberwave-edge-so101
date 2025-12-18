@@ -9,10 +9,12 @@ Example:
 import sys
 
 from utils import find_port
+from dotenv import load_dotenv
 
 
 def main():
     """Main entry point for find_port script."""
+    load_dotenv()
     try:
         port = find_port()
         print(f"\n✓ Found port: {port}")
@@ -27,4 +29,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
