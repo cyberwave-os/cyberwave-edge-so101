@@ -59,6 +59,7 @@ def _camera_worker_thread(
             camera_id=camera_id,
             fps=fps,
             time_reference=time_reference,
+            sensor_type="rgb",
         )
 
         # Monitor the threading stop_event and set async_stop_event
