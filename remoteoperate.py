@@ -77,8 +77,9 @@ class StatusTracker:
             self.errors += 1
 
     def update_joint_states(self, states: Dict[str, float]):
+        """Merge new joint states with existing ones (doesn't replace)."""
         with self.lock:
-            self.joint_states = states.copy()
+            self.joint_states.update(states)
 
     def set_joint_index_to_name(self, mapping: Dict[str, str]):
         """Set mapping from joint index to joint name."""
