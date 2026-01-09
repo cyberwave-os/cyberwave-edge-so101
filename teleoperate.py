@@ -481,8 +481,8 @@ def _status_logging_thread(
         lines.append("=" * 60)
 
         # Twin info
-        robot_uuid_short = status["robot_uuid"][:8] if status["robot_uuid"] else "N/A"
-        camera_uuid_short = status["camera_uuid"][:8] if status["camera_uuid"] else "N/A"
+        robot_uuid_short = status["robot_uuid"] if status["robot_uuid"] else "N/A"
+        camera_uuid_short = status["camera_uuid"] if status["camera_uuid"] else "N/A"
         robot_name = status["robot_name"] or "N/A"
         camera_name = status["camera_name"] or "N/A"
         lines.append(f"Robot: {robot_name} ({robot_uuid_short}...)".ljust(60))
@@ -799,9 +799,9 @@ def teleoperate(
 
     # Set twin info for status display
     robot_uuid = robot.uuid if robot else ""
-    robot_name = robot.name if robot and hasattr(robot, 'name') else ""
+    robot_name = robot.name if robot and hasattr(robot, 'name') else "so101-teleop"
     camera_uuid_val = camera.uuid if camera else ""
-    camera_name = camera.name if camera and hasattr(camera, 'name') else ""
+    camera_name = camera.name if camera and hasattr(camera, 'name') else "camera-teleop"
     status_tracker.set_twin_info(robot_uuid, robot_name, camera_uuid_val, camera_name)
 
     # Ensure MQTT client is connected
@@ -1075,8 +1075,8 @@ def main():
         args.camera_uuid = args.twin_uuid
     # Initialize Cyberwave client and get MQTT client
     cyberwave_client = Cyberwave()
-    robot = cyberwave_client.twin(asset_key="the-robot-studio/so101", twin_id=args.twin_uuid)
-    camera = cyberwave_client.twin(asset_key="cyberwave/standard-cam", twin_id=args.camera_uuid)
+    robot = cyberwave_client.twin(asset_key="the-robot-studio/so101", twin_id=args.twin_uuid, name="robot")
+    camera = cyberwave_client.twin(asset_key="cyberwave/standard-cam", twin_id=args.camera_uuid, name="camera")
     mqtt_client = cyberwave_client.mqtt
 
     # Initialize leader (optional if camera-only mode)
