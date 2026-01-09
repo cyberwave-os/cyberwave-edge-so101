@@ -39,6 +39,10 @@ class StatusTracker:
         self.errors = 0
         self.joint_states: Dict[str, float] = {}
         self.joint_index_to_name: Dict[str, str] = {}
+        self.robot_uuid: str = ""
+        self.robot_name: str = ""
+        self.camera_uuid: str = ""
+        self.camera_name: str = ""
 
     def update_mqtt_status(self, connected: bool):
         with self.lock:
@@ -74,6 +78,14 @@ class StatusTracker:
         with self.lock:
             self.joint_index_to_name = mapping.copy()
 
+    def set_twin_info(self, robot_uuid: str, robot_name: str, camera_uuid: str, camera_name: str):
+        """Set twin information for display."""
+        with self.lock:
+            self.robot_uuid = robot_uuid
+            self.robot_name = robot_name
+            self.camera_uuid = camera_uuid
+            self.camera_name = camera_name
+
     def get_status(self) -> Dict:
         """Get a snapshot of current status."""
         with self.lock:
@@ -89,6 +101,10 @@ class StatusTracker:
                 "messages_filtered": self.messages_filtered,
                 "errors": self.errors,
                 "joint_states": self.joint_states.copy(),
+                "robot_uuid": self.robot_uuid,
+                "robot_name": self.robot_name,
+                "camera_uuid": self.camera_uuid,
+                "camera_name": self.camera_name,
             }
 
 
@@ -450,7 +466,7 @@ def _status_logging_thread(
     status_interval = 1.0  # Update status at 1 fps
 
     # Number of lines in our display (for cursor movement)
-    num_lines = 10
+    num_lines = 14
 
     # Print initial blank lines
     print("\n" * num_lines)
@@ -463,6 +479,15 @@ def _status_logging_thread(
         lines.append("=" * 60)
         lines.append("SO101 Teleoperation Status".center(60))
         lines.append("=" * 60)
+
+        # Twin info
+        robot_uuid_short = status["robot_uuid"][:8] if status["robot_uuid"] else "N/A"
+        camera_uuid_short = status["camera_uuid"][:8] if status["camera_uuid"] else "N/A"
+        robot_name = status["robot_name"] or "N/A"
+        camera_name = status["camera_name"] or "N/A"
+        lines.append(f"Robot: {robot_name} ({robot_uuid_short}...)".ljust(60))
+        lines.append(f"Camera: {camera_name} ({camera_uuid_short}...)".ljust(60))
+        lines.append("-" * 60)
 
         # Status indicators
         script_icon = "🟢" if status["script_started"] else "🟡"
@@ -771,6 +796,13 @@ def teleoperate(
     # Create status tracker
     status_tracker = StatusTracker()
     status_tracker.script_started = True
+
+    # Set twin info for status display
+    robot_uuid = robot.uuid if robot else ""
+    robot_name = robot.name if robot and hasattr(robot, 'name') else ""
+    camera_uuid_val = camera.uuid if camera else ""
+    camera_name = camera.name if camera and hasattr(camera, 'name') else ""
+    status_tracker.set_twin_info(robot_uuid, robot_name, camera_uuid_val, camera_name)
 
     # Ensure MQTT client is connected
     if cyberwave_client is None:
