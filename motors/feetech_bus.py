@@ -201,7 +201,7 @@ class FeetechMotorsBus(MotorsBus):
                 break
             logger.info(
                 f"Failed to sync read @{addr=} ({length=}) on {motor_ids=} ({n_try=}): "
-                + self.packet_handler.getTxRxResult(comm)
+                + self._packet_handler.getTxRxResult(comm)
             )
             if n_try < num_retry:
                 logger.debug(f"sync_read_positions failed (try {n_try + 1}/{num_retry + 1}): {comm}")
