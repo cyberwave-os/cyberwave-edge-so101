@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import logging
+import math
 import queue
 import select
 import sys
@@ -368,13 +369,13 @@ def _process_cyberwave_updates(
     heartbeat_interval: float = 1.0,
 ) -> tuple[int, int]:
     """
-    Process leader action and queue Cyberwave updates for changed joints.
+    Process follower observation and queue Cyberwave updates for changed joints.
 
-    Leader action is now normalized positions. If a joint hasn't been sent
+    Follower observation contains normalized positions. If a joint hasn't been sent
     for heartbeat_interval seconds, it will be sent anyway as a heartbeat.
 
     Args:
-        action: Leader action dictionary with normalized positions (keys have .pos suffix)
+        action: Follower observation dictionary with normalized positions (keys have .pos suffix)
         last_observation: Dictionary tracking last sent observation state (normalized positions)
         action_queue: Queue for Cyberwave updates
         position_threshold: Minimum change in normalized position to trigger update
@@ -654,11 +655,11 @@ def _teleop_loop(
     heartbeat_interval: float = 1.0,
 ) -> tuple[int, int]:
     """
-    Main teleoperation loop: read from leader, send to follower, and queue Cyberwave updates.
+    Main teleoperation loop: read from leader, send to follower, and send follower data to Cyberwave.
 
     Args:
         leader: SO101Leader instance
-        follower: Optional SO101Follower instance
+        follower: Optional SO101Follower instance (required when sending to Cyberwave)
         action_queue: Queue for Cyberwave updates
         stop_event: Event to signal loop to stop
         last_observation: Dictionary tracking last sent observation state (normalized positions)
@@ -687,13 +688,21 @@ def _teleop_loop(
             # Generate timestamp for this iteration (before reading action)
             timestamp, timestamp_monotonic = time_reference.update()
 
-            # Read action from leader (normalized positions with .pos suffix)
-            action = leader.get_action()
+            # Read action from leader (for sending to follower)
+            leader_action = leader.get_action() if leader is not None else {}
 
-            # Process Cyberwave updates (queue changed joints)
+            # Read follower observation (for sending to Cyberwave - this is the actual robot state)
+            follower_action = None
+            if follower is not None:
+                follower_action = follower.get_observation()
+            else:
+                # Fallback to leader if no follower (shouldn't happen when robot twin is provided)
+                follower_action = leader_action
+
+            # Process Cyberwave updates (queue changed joints from follower)
             # Worker thread handles all conversion
             update_count, skip_count = _process_cyberwave_updates(
-                action=action,
+                action=follower_action,
                 last_observation=last_observation,
                 action_queue=action_queue,
                 position_threshold=position_threshold,
@@ -710,18 +719,14 @@ def _teleop_loop(
             # Send action to follower if provided
             leader_observation = None
             follower_observation = None
-            if follower is not None:
+            if follower is not None and leader is not None:
                 try:
-                    # Get normalized positions from leader
-                    # Leader's get_action() returns normalized positions with .pos suffix
-                    leader_action = leader.get_action()
-                    # Send directly to follower (follower handles safety limits and normalization)
+                    # Send leader action to follower (follower handles safety limits and normalization)
                     follower.send_action(leader_action)
 
                     # Get observations for logging
                     if log_states:
-                        if leader_observation is None:
-                            leader_observation = leader.get_observation()
+                        leader_observation = leader.get_observation()
                         follower_observation = follower.get_observation()
 
                 except Exception:
@@ -777,15 +782,16 @@ def teleoperate(
     camera: Optional[Twin] = None,
 ) -> None:
     """
-    Run teleoperation loop: read from leader and update Cyberwave twin joint states.
+    Run teleoperation loop: read from leader, send to follower, and send follower data to Cyberwave.
 
     Uses a separate thread with a FIFO queue to send updates to Cyberwave,
     keeping the main loop responsive. Only sends updates when values change.
+    Follower data (actual robot state) is sent to Cyberwave, not leader data.
 
     Args:
         leader: SO101Leader instance (optional if camera_only=True)
         cyberwave_client: Cyberwave client instance (required)
-        follower: Optional SO101Follower instance (required for camera streaming)
+        follower: SO101Follower instance (required when robot twin is provided)
         fps: Target frames per second for the teleoperation loop
         camera_fps: Frames per second for camera streaming
         use_radians: If True, convert positions to radians; if False, convert to degrees (default)
@@ -838,6 +844,10 @@ def teleoperate(
     if leader is not None and not leader.connected:
         raise RuntimeError("Leader is not connected")
 
+    # Require follower when robot twin is provided (we send follower data to Cyberwave)
+    if robot is not None and follower is None:
+        raise RuntimeError("Follower is required when robot twin is provided (follower data is sent to Cyberwave)")
+
     if follower is not None and not follower.connected:
         raise RuntimeError("Follower is not connected")
 
@@ -852,20 +862,25 @@ def teleoperate(
                 "Leader is not calibrated. Please calibrate the leader first using the calibration script."
             )
 
+    # Use follower motors for mappings when sending to Cyberwave (follower data is what we send)
+    # Fall back to leader motors if follower not available (for camera-only mode)
+    motors_for_mapping = follower.motors if follower is not None else (leader.motors if leader is not None else {})
+
+    if motors_for_mapping:
         # Create mapping from joint names to joint indexes (motor IDs: 1-6)
-        joint_name_to_index = {name: motor.id for name, motor in leader.motors.items()}
+        joint_name_to_index = {name: motor.id for name, motor in motors_for_mapping.items()}
 
         # Create mapping from joint indexes to joint names (for status display)
-        joint_index_to_name = {str(motor.id): name for name, motor in leader.motors.items()}
+        joint_index_to_name = {str(motor.id): name for name, motor in motors_for_mapping.items()}
         status_tracker.set_joint_index_to_name(joint_index_to_name)
 
         # Create mapping from joint names to normalization modes
-        joint_name_to_norm_mode = {name: motor.norm_mode for name, motor in leader.motors.items()}
+        joint_name_to_norm_mode = {name: motor.norm_mode for name, motor in motors_for_mapping.items()}
 
         # Initialize last observation state (track normalized positions)
-        # Leader returns normalized positions, worker thread handles conversion to degrees/radians
+        # Follower returns normalized positions, worker thread handles conversion to degrees/radians
         last_observation: Dict[str, float] = {}
-        for joint_name in leader.motors.keys():
+        for joint_name in motors_for_mapping.keys():
             last_observation[joint_name] = float("inf")  # Use inf to force first update
     else:
         joint_name_to_index = {}
@@ -873,7 +888,7 @@ def teleoperate(
         last_observation: Dict[str, float] = {}
 
     # Create queue and worker thread for Cyberwave updates
-    num_joints = len(leader.motors) if leader is not None else 0
+    num_joints = len(motors_for_mapping) if motors_for_mapping else 0
     sampling_rate = 100  # Hz
     seconds = 60  # seconds
     queue_size = num_joints * sampling_rate * seconds if num_joints > 0 else 1000
@@ -937,26 +952,51 @@ def teleoperate(
         else:
             status_tracker.update_camera_status(detected=False, started=False)
 
+    # TimeReference synchronization: The teleop loop updates TimeReference, and the camera reads from it.
+    # This ensures that when an action is performed, the camera frame is synchronized with that action.
+    # The camera calls time_reference.read() to get the timestamp that was set by the teleop loop.
+    # We require fps >= camera_fps to ensure the teleop loop updates TimeReference at least as fast
+    # as the camera captures frames.
+    if follower is not None and follower.config.cameras and len(follower.config.cameras) > 0:
+        if fps < camera_fps:
+            raise ValueError(
+                f"fps ({fps}) must be >= camera_fps ({camera_fps}) for proper synchronization. "
+                "The teleop loop must update TimeReference at least as fast as the camera captures frames."
+            )
+
     frame_time = 1.0 / fps
+    status_tracker.fps = fps
+
     try:
         if (
-            leader is not None
+            follower is not None
             and robot is not None
             and mqtt_client is not None
             and time_reference is not None
         ):
-            actions = leader.get_action()
-            actions = {
-                key.removesuffix(".pos"): val
-                for key, val in actions.items()
-                if key.endswith(".pos")
-            }
-            # Use joint_name_to_index to convert actions to joint indexes
-            actions = {joint_name_to_index[key]: val for key, val in actions.items()}
-            # Send actions to Cyberwave as single update
+            # Get follower observation (this is what we send to Cyberwave)
+            follower_obs = follower.get_observation()
+            observations = {}
+            for joint_key, normalized_pos in follower_obs.items():
+                # Remove .pos suffix if present
+                name = joint_key.removesuffix(".pos")
+                if name in follower.motors:
+                    joint_index = follower.motors[name].id
+                    # Convert normalized position to radians for Cyberwave
+                    norm_mode = joint_name_to_norm_mode[name]
+                    if norm_mode == MotorNormMode.RANGE_M100_100:
+                        degrees = (normalized_pos / 100.0) * 180.0
+                        radians = degrees * math.pi / 180.0
+                    elif norm_mode == MotorNormMode.RANGE_0_100:
+                        degrees = (normalized_pos / 100.0) * 360.0
+                        radians = degrees * math.pi / 180.0
+                    else:
+                        radians = normalized_pos * math.pi / 180.0  # Assume degrees
+                    observations[joint_index] = radians
+            # Send follower observations to Cyberwave as single update
             mqtt_client.publish_initial_observation(
                 twin_uuid=robot.uuid,
-                observations=actions,
+                observations=observations,
             )
 
     except Exception:
