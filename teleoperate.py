@@ -31,7 +31,8 @@ class StatusTracker:
         self.mqtt_connected = False
         self.camera_detected = False
         self.camera_started = False
-        self.webrtc_connected = False
+        # WebRTC states: "idle" (red), "connecting" (yellow), "streaming" (green)
+        self.webrtc_state = "idle"
         self.fps = 0
         self.camera_fps = 0
         self.messages_produced = 0
@@ -53,9 +54,10 @@ class StatusTracker:
             self.camera_detected = detected
             self.camera_started = started
 
-    def update_webrtc_status(self, connected: bool):
+    def update_webrtc_state(self, state: str):
+        """Update WebRTC state: 'idle', 'connecting', or 'streaming'."""
         with self.lock:
-            self.webrtc_connected = connected
+            self.webrtc_state = state
 
     def increment_produced(self):
         with self.lock:
@@ -94,7 +96,7 @@ class StatusTracker:
                 "mqtt_connected": self.mqtt_connected,
                 "camera_detected": self.camera_detected,
                 "camera_started": self.camera_started,
-                "webrtc_connected": self.webrtc_connected,
+                "webrtc_state": self.webrtc_state,
                 "fps": self.fps,
                 "camera_fps": self.camera_fps,
                 "messages_produced": self.messages_produced,
@@ -161,17 +163,25 @@ def _camera_worker_thread(
         # Start the monitor task
         monitor_task = asyncio.create_task(monitor_stop())
 
+        def command_callback(status: str, msg: str):
+            """Callback to track WebRTC state from commands."""
+            if status_tracker:
+                if "started" in msg.lower() or status == "ok":
+                    status_tracker.update_webrtc_state("streaming")
+                elif "stopped" in msg.lower():
+                    status_tracker.update_webrtc_state("idle")
+
         try:
             # Update status when camera starts
             if status_tracker:
                 status_tracker.update_camera_status(detected=True, started=True)
-                # Assume WebRTC connects when camera starts (will be updated by actual connection status)
-                status_tracker.update_webrtc_status(connected=True)
+                # WebRTC starts in connecting state when camera worker begins
+                status_tracker.update_webrtc_state("connecting")
 
             # Run with auto-reconnect - this handles all command subscriptions internally
             await streamer.run_with_auto_reconnect(
                 stop_event=async_stop_event,
-                command_callback=lambda status, msg: None,  # Reduced logging
+                command_callback=command_callback,
             )
         finally:
             monitor_task.cancel()
@@ -495,7 +505,14 @@ def _status_logging_thread(
                 camera_icon = "🟡"
             else:
                 camera_icon = "🟢"
-            webrtc_icon = "🟢" if status["webrtc_connected"] else "🔴"
+            # WebRTC: idle=red, connecting=yellow, streaming=green
+            webrtc_state = status["webrtc_state"]
+            if webrtc_state == "streaming":
+                webrtc_icon = "🟢"
+            elif webrtc_state == "connecting":
+                webrtc_icon = "🟡"
+            else:
+                webrtc_icon = "🔴"
 
             lines.append(f"Script:{script_icon} MQTT:{mqtt_icon} Camera:{camera_icon} WebRTC:{webrtc_icon}".ljust(70))
             lines.append("-" * 70)
