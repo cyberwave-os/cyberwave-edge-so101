@@ -465,79 +465,78 @@ def _status_logging_thread(
     status_tracker.camera_fps = camera_fps
     status_interval = 1.0  # Update status at 1 fps
 
-    # Number of lines in our display (for cursor movement)
-    num_lines = 14
+    # Hide cursor and save position
+    sys.stdout.write("\033[?25l")  # Hide cursor
+    sys.stdout.flush()
 
-    # Print initial blank lines
-    print("\n" * num_lines)
+    try:
+        while not stop_event.is_set():
+            status = status_tracker.get_status()
 
-    while not stop_event.is_set():
-        status = status_tracker.get_status()
+            # Build status display with fixed width lines
+            lines = []
+            lines.append("=" * 70)
+            lines.append("SO101 Teleoperation Status".center(70))
+            lines.append("=" * 70)
 
-        # Build status display with fixed width lines
-        lines = []
-        lines.append("=" * 60)
-        lines.append("SO101 Teleoperation Status".center(60))
-        lines.append("=" * 60)
+            # Twin info
+            robot_name = status["robot_name"] or "N/A"
+            camera_name = status["camera_name"] or "N/A"
+            lines.append(f"Robot:  {robot_name} ({status['robot_uuid']})"[:70].ljust(70))
+            lines.append(f"Camera: {camera_name} ({status['camera_uuid']})"[:70].ljust(70))
+            lines.append("-" * 70)
 
-        # Twin info
-        robot_uuid_short = status["robot_uuid"] if status["robot_uuid"] else "N/A"
-        camera_uuid_short = status["camera_uuid"] if status["camera_uuid"] else "N/A"
-        robot_name = status["robot_name"] or "N/A"
-        camera_name = status["camera_name"] or "N/A"
-        lines.append(f"Robot: {robot_name} ({robot_uuid_short}...)".ljust(60))
-        lines.append(f"Camera: {camera_name} ({camera_uuid_short}...)".ljust(60))
-        lines.append("-" * 60)
+            # Status indicators
+            script_icon = "🟢" if status["script_started"] else "🟡"
+            mqtt_icon = "🟢" if status["mqtt_connected"] else "🔴"
+            if not status["camera_detected"]:
+                camera_icon = "🔴"
+            elif not status["camera_started"]:
+                camera_icon = "🟡"
+            else:
+                camera_icon = "🟢"
+            webrtc_icon = "🟢" if status["webrtc_connected"] else "🔴"
 
-        # Status indicators
-        script_icon = "🟢" if status["script_started"] else "🟡"
-        mqtt_icon = "🟢" if status["mqtt_connected"] else "🔴"
-        if not status["camera_detected"]:
-            camera_icon = "🔴"
-        elif not status["camera_started"]:
-            camera_icon = "🟡"
-        else:
-            camera_icon = "🟢"
-        webrtc_icon = "🟢" if status["webrtc_connected"] else "🔴"
+            lines.append(f"Script:{script_icon} MQTT:{mqtt_icon} Camera:{camera_icon} WebRTC:{webrtc_icon}".ljust(70))
+            lines.append("-" * 70)
 
-        lines.append(f"Script:{script_icon} MQTT:{mqtt_icon} Camera:{camera_icon} WebRTC:{webrtc_icon}".ljust(60))
-        lines.append("-" * 60)
+            # Statistics
+            stats = f"FPS:{status['fps']} Cam:{status['camera_fps']} Prod:{status['messages_produced']} Filt:{status['messages_filtered']} Err:{status['errors']}"
+            lines.append(stats.ljust(70))
+            lines.append("-" * 70)
 
-        # Statistics
-        stats = f"FPS:{status['fps']} Cam:{status['camera_fps']} Prod:{status['messages_produced']} Filt:{status['messages_filtered']} Err:{status['errors']}"
-        lines.append(stats.ljust(60))
-        lines.append("-" * 60)
+            # Joint states
+            if status["joint_states"]:
+                index_to_name = status_tracker.joint_index_to_name
+                joint_parts = []
+                for joint_index in sorted(status["joint_states"].keys()):
+                    position = status["joint_states"][joint_index]
+                    joint_name = index_to_name.get(joint_index, joint_index)
+                    short_name = joint_name[:3]
+                    joint_parts.append(f"{short_name}:{position:5.1f}")
+                lines.append(" ".join(joint_parts).ljust(70))
+            else:
+                lines.append("Joints: (waiting)".ljust(70))
 
-        # Joint states
-        if status["joint_states"]:
-            index_to_name = status_tracker.joint_index_to_name
-            joint_parts = []
-            for joint_index in sorted(status["joint_states"].keys()):
-                position = status["joint_states"][joint_index]
-                joint_name = index_to_name.get(joint_index, joint_index)
-                short_name = joint_name[:3]
-                joint_parts.append(f"{short_name}:{position:5.1f}")
-            lines.append(" ".join(joint_parts).ljust(60))
-        else:
-            lines.append("Joints: (waiting)".ljust(60))
+            lines.append("=" * 70)
+            lines.append("Press 'q' to stop".ljust(70))
 
-        lines.append("=" * 60)
-        lines.append("Press 'q' to stop".ljust(60))
+            # Clear screen and move to top, then write all lines
+            output = "\033[2J\033[H"  # Clear screen and move to home
+            output += "\n".join(lines)
 
-        # Build output with carriage returns to overwrite each line
-        # Move cursor up N lines, then write each line with \r\n
-        output = f"\033[{num_lines}A"  # Move cursor up
-        for line in lines:
-            output += f"\r{line}\033[K\n"  # Carriage return, line, clear to end, newline
+            try:
+                sys.stdout.write(output)
+                sys.stdout.flush()
+            except (IOError, OSError):
+                pass
 
-        try:
-            sys.stdout.write(output)
-            sys.stdout.flush()
-        except (IOError, OSError):
-            pass
-
-        # Wait for next update
-        time.sleep(status_interval)
+            # Wait for next update
+            time.sleep(status_interval)
+    finally:
+        # Show cursor again when done
+        sys.stdout.write("\033[?25h")  # Show cursor
+        sys.stdout.flush()
 
 
 def _log_leader_follower_states(
