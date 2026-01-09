@@ -23,6 +23,76 @@ from utils import setup_logging
 logger = logging.getLogger(__name__)
 
 
+class StatusTracker:
+    """Thread-safe status tracker for teleoperation system."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.script_started = False
+        self.mqtt_connected = False
+        self.camera_detected = False
+        self.camera_started = False
+        self.webrtc_connected = False
+        self.fps = 0
+        self.camera_fps = 0
+        self.messages_produced = 0
+        self.messages_filtered = 0
+        self.errors = 0
+        self.joint_states: Dict[str, float] = {}
+        self.joint_index_to_name: Dict[str, str] = {}
+
+    def update_mqtt_status(self, connected: bool):
+        with self.lock:
+            self.mqtt_connected = connected
+
+    def update_camera_status(self, detected: bool, started: bool = False):
+        with self.lock:
+            self.camera_detected = detected
+            self.camera_started = started
+
+    def update_webrtc_status(self, connected: bool):
+        with self.lock:
+            self.webrtc_connected = connected
+
+    def increment_produced(self):
+        with self.lock:
+            self.messages_produced += 1
+
+    def increment_filtered(self):
+        with self.lock:
+            self.messages_filtered += 1
+
+    def increment_errors(self):
+        with self.lock:
+            self.errors += 1
+
+    def update_joint_states(self, states: Dict[str, float]):
+        with self.lock:
+            self.joint_states = states.copy()
+
+    def set_joint_index_to_name(self, mapping: Dict[str, str]):
+        """Set mapping from joint index to joint name."""
+        with self.lock:
+            self.joint_index_to_name = mapping.copy()
+
+    def get_status(self) -> Dict:
+        """Get a snapshot of current status."""
+        with self.lock:
+            return {
+                "script_started": self.script_started,
+                "mqtt_connected": self.mqtt_connected,
+                "camera_detected": self.camera_detected,
+                "camera_started": self.camera_started,
+                "webrtc_connected": self.webrtc_connected,
+                "fps": self.fps,
+                "camera_fps": self.camera_fps,
+                "messages_produced": self.messages_produced,
+                "messages_filtered": self.messages_filtered,
+                "errors": self.errors,
+                "joint_states": self.joint_states.copy(),
+            }
+
+
 def _camera_worker_thread(
     client: Cyberwave,
     camera_id: int,
@@ -30,6 +100,7 @@ def _camera_worker_thread(
     twin_uuid: str,
     stop_event: threading.Event,
     time_reference: TimeReference,
+    status_tracker: Optional[StatusTracker] = None,
 ) -> None:
     """
     Worker thread that handles camera streaming.
@@ -45,10 +116,12 @@ def _camera_worker_thread(
         twin_uuid: UUID of the twin to stream to
         stop_event: Event to signal thread to stop
         time_reference: TimeReference instance
+        status_tracker: Optional status tracker for camera status updates
     Returns:
         None
     """
-    logger.debug("Camera worker thread started")
+    if status_tracker:
+        status_tracker.update_camera_status(detected=True, started=False)
 
     async def _run_camera_streamer():
         """Async function that runs the camera streamer with auto-reconnect."""
@@ -74,12 +147,16 @@ def _camera_worker_thread(
         monitor_task = asyncio.create_task(monitor_stop())
 
         try:
+            # Update status when camera starts
+            if status_tracker:
+                status_tracker.update_camera_status(detected=True, started=True)
+                # Assume WebRTC connects when camera starts (will be updated by actual connection status)
+                status_tracker.update_webrtc_status(connected=True)
+
             # Run with auto-reconnect - this handles all command subscriptions internally
             await streamer.run_with_auto_reconnect(
                 stop_event=async_stop_event,
-                command_callback=lambda status, msg: logger.info(
-                    f"Camera command: {status} - {msg}"
-                ),
+                command_callback=lambda status, msg: None,  # Reduced logging
             )
         finally:
             monitor_task.cancel()
@@ -94,14 +171,15 @@ def _camera_worker_thread(
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(_run_camera_streamer())
-    except Exception as e:
-        logger.error(f"Error in camera worker thread: {e}", exc_info=True)
+    except Exception:
+        if status_tracker:
+            status_tracker.increment_errors()
     finally:
         if loop is not None:
             try:
                 loop.close()
-            except Exception as e:
-                logger.error(f"Error closing event loop: {e}", exc_info=True)
+            except Exception:
+                pass
 
 
 def cyberwave_update_worker(
@@ -112,6 +190,7 @@ def cyberwave_update_worker(
     stop_event: threading.Event,
     twin: Optional[Twin] = None,
     time_reference: TimeReference = None,
+    status_tracker: Optional[StatusTracker] = None,
 ) -> None:
     """
     Worker thread that processes actions from the queue and updates Cyberwave twin.
@@ -128,12 +207,13 @@ def cyberwave_update_worker(
         stop_event: Event to signal thread to stop
         twin: Optional Twin instance for updating joint states
         time_reference: TimeReference instance
+        status_tracker: Optional status tracker for statistics
     Returns:
         None
     """
-    logger.debug("Cyberwave update worker thread started")
     processed_count = 0
     error_count = 0
+    filtered_count = 0
     batch_timeout = 0.01  # 10ms - collect updates for batching
 
     while not stop_event.is_set():
@@ -159,9 +239,6 @@ def cyberwave_update_worker(
                     # Get joint index from joint name
                     joint_index = joint_name_to_index.get(joint_name)
                     if joint_index is None:
-                        logger.warning(
-                            f"Joint '{joint_name}' not found in joint_name_to_index mapping"
-                        )
                         action_queue.task_done()
                         continue
 
@@ -216,6 +293,9 @@ def cyberwave_update_worker(
 
                     # Skip if position is 0.0 (or very close to 0)
                     if abs(position) < 1e-6:
+                        filtered_count += 1
+                        if status_tracker:
+                            status_tracker.increment_filtered()
                         action_queue.task_done()
                         continue
 
@@ -223,19 +303,17 @@ def cyberwave_update_worker(
                     batch_updates[joint_index] = (position, velocity, effort, timestamp)
                     action_queue.task_done()
 
-                except Exception as e:
+                except Exception:
                     error_count += 1
-                    joint_index_str = str(joint_name_to_index.get(joint_name, "unknown"))
-                    logger.warning(
-                        f"Failed to process joint {joint_name} (index {joint_index_str}): {e}",
-                        exc_info=True,
-                    )
+                    if status_tracker:
+                        status_tracker.increment_errors()
                     action_queue.task_done()
 
             # Send batched updates
             if batch_updates:
                 try:
                     # Send all joints in the batch
+                    joint_states = {}
                     for joint_index, (position, _, _, timestamp) in batch_updates.items():
                         twin.joints.set(
                             joint_name=str(joint_index),
@@ -243,20 +321,21 @@ def cyberwave_update_worker(
                             degrees=False,
                             timestamp=timestamp,
                         )
+                        joint_states[str(joint_index)] = position
+
                     processed_count += len(batch_updates)
-                except Exception as e:
+                    if status_tracker:
+                        status_tracker.increment_produced()
+                        status_tracker.update_joint_states(joint_states)
+                except Exception:
                     error_count += len(batch_updates)
-                    logger.warning(
-                        f"Failed to send batch update for {len(batch_updates)} joints: {e}",
-                        exc_info=True,
-                    )
+                    if status_tracker:
+                        status_tracker.increment_errors()
 
-        except Exception as e:
-            logger.error(f"Error in cyberwave update worker: {e}", exc_info=True)
-
-    logger.info(
-        f"Cyberwave update worker stopped. Processed: {processed_count}, Errors: {error_count}"
-    )
+        except Exception:
+            error_count += 1
+            if status_tracker:
+                status_tracker.increment_errors()
 
 
 def _process_cyberwave_updates(
@@ -267,6 +346,7 @@ def _process_cyberwave_updates(
     velocity_threshold: float,
     effort_threshold: float,
     timestamp: float,
+    status_tracker: Optional[StatusTracker] = None,
 ) -> tuple[int, int]:
     """
     Process leader action and queue Cyberwave updates for changed joints.
@@ -281,6 +361,7 @@ def _process_cyberwave_updates(
         velocity_threshold: Unused (kept for compatibility)
         effort_threshold: Unused (kept for compatibility)
         timestamp: Timestamp to associate with this update (generated in teleop loop)
+        status_tracker: Optional status tracker for statistics
     Returns:
         Tuple of (update_count, skip_count)
     """
@@ -320,14 +401,85 @@ def _process_cyberwave_updates(
                 action_queue.put_nowait((joint_name, action_data))
                 update_count += 1
             except queue.Full:
-                logger.warning(
-                    f"Action queue full, dropping update for {joint_name}. "
-                    "Consider increasing queue size or reducing fps."
-                )
+                if status_tracker:
+                    status_tracker.increment_errors()
+                continue
         else:
             skip_count += 1
+            if status_tracker:
+                status_tracker.increment_filtered()
 
     return update_count, skip_count
+
+
+def _status_logging_thread(
+    status_tracker: StatusTracker,
+    stop_event: threading.Event,
+    fps: int,
+    camera_fps: int,
+) -> None:
+    """
+    Thread that logs status information at 1 fps.
+
+    Args:
+        status_tracker: StatusTracker instance
+        stop_event: Event to signal thread to stop
+        fps: Target frames per second for teleoperation loop
+        camera_fps: Frames per second for camera streaming
+    """
+    status_tracker.fps = fps
+    status_tracker.camera_fps = camera_fps
+    status_interval = 1.0  # Update status at 1 fps
+
+    while not stop_event.is_set():
+        status = status_tracker.get_status()
+
+        # Clear previous status (using ANSI escape codes)
+        print("\033[2J\033[H", end="")  # Clear screen and move cursor to top
+
+        # Script status
+        script_status = "🟡 Starting" if not status["script_started"] else "🟢 Running"
+        print(f"Script: {script_status}")
+
+        # MQTT status
+        mqtt_status = "🟢 Connected" if status["mqtt_connected"] else "🔴 Disconnected"
+        print(f"MQTT:   {mqtt_status}")
+
+        # Camera status
+        if not status["camera_detected"]:
+            camera_status = "🔴 No camera detected"
+        elif not status["camera_started"]:
+            camera_status = "🟡 Camera detected (not started)"
+        else:
+            camera_status = "🟢 Camera streaming"
+        print(f"Camera: {camera_status}")
+
+        # WebRTC status
+        webrtc_status = "🟢 Connected" if status["webrtc_connected"] else "🔴 Disconnected"
+        print(f"WebRTC: {webrtc_status}")
+
+        # Statistics
+        print("\nStats:")
+        print(f"  FPS:           {status['fps']}")
+        print(f"  Camera FPS:    {status['camera_fps']}")
+        print(f"  Produced:      {status['messages_produced']}")
+        print(f"  Filtered:      {status['messages_filtered']}")
+        print(f"  Errors:        {status['errors']}")
+
+        # Joint states
+        if status["joint_states"]:
+            print("\nJoint States:")
+            # Get joint index to name mapping
+            index_to_name = status_tracker.joint_index_to_name
+            for joint_index in sorted(status["joint_states"].keys()):
+                position = status["joint_states"][joint_index]
+                joint_name = index_to_name.get(joint_index, joint_index)
+                print(f"  {joint_name:16s}: {position:8.3f}")
+
+        print("\nPress 'q' to stop")
+
+        # Wait for next update
+        time.sleep(status_interval)
 
 
 def _log_leader_follower_states(
@@ -409,7 +561,6 @@ def _keyboard_input_thread(stop_event: threading.Event) -> None:
                     if select.select([sys.stdin], [], [], 0.1)[0]:
                         char = sys.stdin.read(1)
                         if char == "q" or char == "Q":
-                            logger.info("\n'q' key pressed - stopping teleoperation loop...")
                             stop_event.set()
                             break
             finally:
@@ -433,6 +584,7 @@ def _teleop_loop(
     log_states_interval: int,
     frame_time: float,
     time_reference: TimeReference,
+    status_tracker: Optional[StatusTracker] = None,
 ) -> tuple[int, int]:
     """
     Main teleoperation loop: read from leader, send to follower, and queue Cyberwave updates.
@@ -466,7 +618,6 @@ def _teleop_loop(
 
             # Read action from leader (normalized positions with .pos suffix)
             action = leader.get_action()
-            logger.debug(f"Leader action: {action}")
 
             # Process Cyberwave updates (queue changed joints)
             # Worker thread handles all conversion
@@ -478,6 +629,7 @@ def _teleop_loop(
                 velocity_threshold=velocity_threshold,
                 effort_threshold=effort_threshold,
                 timestamp=timestamp,  # Pass timestamp to processing function
+                status_tracker=status_tracker,
             )
             total_update_count += update_count
             total_skip_count += skip_count
@@ -522,16 +674,14 @@ def _teleop_loop(
             # Rate limiting
             elapsed = time.time() - loop_start
             sleep_time = frame_time - elapsed
-            logger.debug(
-                f"Elapsed time: {elapsed:.4f}s, target: {frame_time:.4f}s, sleep time: {sleep_time:.4f}s"
-            )
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
     except KeyboardInterrupt:
-        logger.info("Teleoperation loop interrupted by user")
-    except Exception as e:
-        logger.error(f"Error in teleoperation loop: {e}", exc_info=True)
+        pass
+    except Exception:
+        if status_tracker:
+            status_tracker.increment_errors()
         raise
 
     return total_update_count, total_skip_count
@@ -575,13 +725,17 @@ def teleoperate(
     """
     setup_logging()
     time_reference = TimeReference()
+
+    # Create status tracker
+    status_tracker = StatusTracker()
+    status_tracker.script_started = True
+
     # Ensure MQTT client is connected
     if cyberwave_client is None:
         raise RuntimeError("Cyberwave client is required")
 
     mqtt_client = cyberwave_client.mqtt
     if mqtt_client is not None and not mqtt_client.connected:
-        logger.info("Connecting to Cyberwave MQTT broker...")
         mqtt_client.connect()
 
         # Wait for connection with timeout
@@ -589,11 +743,14 @@ def teleoperate(
         wait_start = time.time()
         while not mqtt_client.connected:
             if time.time() - wait_start > max_wait_time:
+                status_tracker.update_mqtt_status(False)
                 raise RuntimeError(
                     f"Failed to connect to Cyberwave MQTT broker within {max_wait_time} seconds"
                 )
             time.sleep(0.1)
-        logger.info("Connected to Cyberwave MQTT broker")
+        status_tracker.update_mqtt_status(True)
+    else:
+        status_tracker.update_mqtt_status(mqtt_client.connected if mqtt_client else False)
 
     if leader is not None and not leader.connected:
         raise RuntimeError("Leader is not connected")
@@ -603,16 +760,7 @@ def teleoperate(
 
     # Verify follower has torque enabled (required for movement)
     if follower is not None and not follower.torque_enabled:
-        logger.warning("Follower torque is not enabled! Motors will not move.")
-        logger.info("Enabling follower torque...")
         follower.enable_torque()
-
-    # Log follower configuration for debugging
-    if follower is not None:
-        logger.info(
-            f"Follower configured with max_relative_target={follower.config.max_relative_target} "
-            f"(this limits movement speed - increase if follower moves too slowly)"
-        )
 
     # Get calibration data from leader (leader handles its own calibration loading)
     if leader is not None:
@@ -623,11 +771,13 @@ def teleoperate(
 
         # Create mapping from joint names to joint indexes (motor IDs: 1-6)
         joint_name_to_index = {name: motor.id for name, motor in leader.motors.items()}
-        logger.debug(f"Joint name to index mapping: {joint_name_to_index}")
+
+        # Create mapping from joint indexes to joint names (for status display)
+        joint_index_to_name = {str(motor.id): name for name, motor in leader.motors.items()}
+        status_tracker.set_joint_index_to_name(joint_index_to_name)
 
         # Create mapping from joint names to normalization modes
         joint_name_to_norm_mode = {name: motor.norm_mode for name, motor in leader.motors.items()}
-        logger.debug(f"Joint name to norm mode mapping: {joint_name_to_norm_mode}")
 
         # Initialize last observation state (track normalized positions)
         # Leader returns normalized positions, worker thread handles conversion to degrees/radians
@@ -654,7 +804,14 @@ def teleoperate(
         daemon=True,
     )
     keyboard_thread.start()
-    logger.info("Press 'q' to stop teleoperation")
+
+    # Start status logging thread
+    status_thread = threading.Thread(
+        target=_status_logging_thread,
+        args=(status_tracker, stop_event, fps, camera_fps),
+        daemon=True,
+    )
+    status_thread.start()
 
     # Start MQTT update worker thread
     worker_thread = None
@@ -669,11 +826,11 @@ def teleoperate(
                 stop_event,
                 robot,
                 time_reference,
+                status_tracker,
             ),
             daemon=True,
         )
         worker_thread.start()
-        logger.info("Started Cyberwave update worker thread")
 
     # Start camera streaming thread if follower has cameras configured
     camera_thread = None
@@ -689,24 +846,15 @@ def teleoperate(
                     camera.uuid,
                     stop_event,
                     time_reference,
+                    status_tracker,
                 ),
                 daemon=True,
             )
             camera_thread.start()
-            logger.info(
-                f"Started camera streaming thread (camera ID: {camera_id}, FPS: {camera_fps})"
-            )
         else:
-            logger.debug("Follower has no cameras configured, skipping camera streaming")
+            status_tracker.update_camera_status(detected=False, started=False)
 
     frame_time = 1.0 / fps
-    # Thresholds: position is in normalized units (e.g., 0.1 for normalized position change)
-    # Worker thread handles conversion to degrees/radians for Cyberwave
-    logger.info(f"Starting teleoperation loop at {fps} fps")
-    logger.info(
-        f"Change thresholds: position={position_threshold} (normalized), "
-        f"velocity={velocity_threshold}, effort={effort_threshold}"
-    )
     try:
         if (
             leader is not None
@@ -727,16 +875,14 @@ def teleoperate(
                 twin_uuid=robot.uuid,
                 observations=actions,
             )
-            logger.info(
-                f"Initial observation sent to Cyberwave twin {robot.uuid}, {len(actions)} joints updated"
-            )
 
-    except Exception as e:
-        logger.error(f"Error getting leader actions: {e}", exc_info=True)
+    except Exception:
+        if status_tracker:
+            status_tracker.increment_errors()
 
     try:
         if leader is not None:
-            update_count, skip_count = _teleop_loop(
+            _teleop_loop(
                 leader=leader,
                 follower=follower,
                 action_queue=action_queue,
@@ -749,49 +895,29 @@ def teleoperate(
                 log_states_interval=log_states_interval,
                 frame_time=frame_time,
                 time_reference=time_reference,
+                status_tracker=status_tracker,
             )
         else:
             # No leader, just wait for stop event
-            update_count = 0
-            skip_count = 0
             while not stop_event.is_set():
                 time.sleep(0.1)
     finally:
         # Signal all threads to stop
-        logger.info("Stopping all worker threads...")
         stop_event.set()
 
-        # Stop MQTT update worker thread
+        # Wait for threads to finish
         if worker_thread is not None:
-            logger.info("Stopping Cyberwave update worker thread...")
-            # Wait for queue to drain (with timeout)
             try:
                 action_queue.join(timeout=2.0)
             except Exception:
                 pass
-
-            # Wait for thread to finish
             worker_thread.join(timeout=1.0)
-            if worker_thread.is_alive():
-                logger.warning("MQTT update worker thread did not stop in time")
-            else:
-                logger.info("MQTT update worker thread stopped successfully")
 
-        # Stop camera streaming thread
         if camera_thread is not None:
-            logger.info("Stopping camera streaming thread...")
             camera_thread.join(timeout=5.0)
-            if camera_thread.is_alive():
-                logger.warning("Camera streaming thread did not stop in time")
-            else:
-                logger.info("Camera streaming thread stopped successfully")
 
-        logger.info("Teleoperation loop ended")
-        try:
-            logger.info(f"Total updates sent: {update_count}, skipped: {skip_count}")
-        except NameError:
-            # Handle case where loop failed before setting update_count
-            logger.info("Teleoperation loop ended (no statistics available)")
+        if status_thread is not None:
+            status_thread.join(timeout=1.0)
 
 
 def main():
@@ -878,7 +1004,6 @@ def main():
     robot = cyberwave_client.twin(asset_key="the-robot-studio/so101", twin_id=args.twin_uuid)
     camera = cyberwave_client.twin(asset_key="cyberwave/standard-cam", twin_id=args.camera_uuid)
     mqtt_client = cyberwave_client.mqtt
-    logger.info("Connected to Cyberwave MQTT broker and created twin")
 
     # Initialize leader (optional if camera-only mode)
     leader = None
@@ -888,7 +1013,6 @@ def main():
 
         leader_port = args.leader_port
         if not leader_port:
-            logger.info("Finding leader port...")
             leader_port = find_port(device_name="SO101 Leader")
 
         leader_config = LeaderConfig(port=leader_port)
