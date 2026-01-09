@@ -223,6 +223,7 @@ def _camera_worker_thread(
     stop_event: threading.Event,
     time_reference: TimeReference,
     status_tracker: Optional[StatusTracker] = None,
+    camera_type: str = "rgb",
 ) -> None:
     """
     Worker thread that handles camera streaming.
@@ -239,6 +240,7 @@ def _camera_worker_thread(
         stop_event: Event to signal thread to stop
         time_reference: TimeReference instance
         status_tracker: Optional status tracker for camera status updates
+        camera_type: Camera sensor type ("rgb" or "depth", default: "rgb")
     Returns:
         None
     """
@@ -256,7 +258,7 @@ def _camera_worker_thread(
             camera_id=camera_id,
             fps=fps,
             time_reference=time_reference,
-            sensor_type="rgb",
+            sensor_type=camera_type,
         )
 
         # Monitor the threading stop_event and set async_stop_event
@@ -660,6 +662,7 @@ def remoteoperate(
     camera: Optional[Twin] = None,
     fps: int = 30,
     camera_fps: int = 30,
+    camera_type: str = "rgb",
 ) -> None:
     """
     Run remote operation loop: receive joint states via MQTT and write to follower motors.
@@ -671,6 +674,7 @@ def remoteoperate(
         camera: Camera twin instance
         fps: Target frames per second (not used directly, but kept for compatibility)
         camera_fps: Frames per second for camera streaming
+        camera_type: Camera sensor type ("rgb" or "depth", default: "rgb")
     """
     time_reference = TimeReference()
 
@@ -801,7 +805,7 @@ def remoteoperate(
         camera_id = follower.config.cameras[0]
         camera_thread = threading.Thread(
             target=_camera_worker_thread,
-            args=(client, camera_id, camera_fps, camera.uuid, stop_event, time_reference, status_tracker),
+            args=(client, camera_id, camera_fps, camera.uuid, stop_event, time_reference, status_tracker, camera_type),
             daemon=True,
         )
         camera_thread.start()
@@ -899,6 +903,13 @@ def main():
         default=30,
         help="FPS to use for the camera (default: 30)",
     )
+    parser.add_argument(
+        "--camera-type",
+        type=str,
+        choices=["rgb", "depth"],
+        default="rgb",
+        help="Camera sensor type: 'rgb' or 'depth' (default: 'rgb')",
+    )
 
     args = parser.parse_args()
 
@@ -930,6 +941,7 @@ def main():
             robot=robot,
             camera=camera,
             camera_fps=args.camera_fps,
+            camera_type=args.camera_type,
         )
     finally:
         if follower is not None:

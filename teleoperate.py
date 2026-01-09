@@ -40,6 +40,7 @@ class StatusTracker:
         self.messages_filtered = 0
         self.errors = 0
         self.joint_states: Dict[str, float] = {}
+        self.joint_temperatures: Dict[str, float] = {}
         self.joint_index_to_name: Dict[str, str] = {}
         self.robot_uuid: str = ""
         self.robot_name: str = ""
@@ -77,6 +78,11 @@ class StatusTracker:
         with self.lock:
             self.joint_states.update(states)
 
+    def update_joint_temperatures(self, temperatures: Dict[str, float]):
+        """Merge new joint temperatures with existing ones (doesn't replace)."""
+        with self.lock:
+            self.joint_temperatures.update(temperatures)
+
     def set_joint_index_to_name(self, mapping: Dict[str, str]):
         """Set mapping from joint index to joint name."""
         with self.lock:
@@ -105,6 +111,7 @@ class StatusTracker:
                 "messages_filtered": self.messages_filtered,
                 "errors": self.errors,
                 "joint_states": self.joint_states.copy(),
+                "joint_temperatures": self.joint_temperatures.copy(),
                 "robot_uuid": self.robot_uuid,
                 "robot_name": self.robot_name,
                 "camera_uuid": self.camera_uuid,
@@ -120,6 +127,7 @@ def _camera_worker_thread(
     stop_event: threading.Event,
     time_reference: TimeReference,
     status_tracker: Optional[StatusTracker] = None,
+    camera_type: str = "rgb",
 ) -> None:
     """
     Worker thread that handles camera streaming.
@@ -136,6 +144,7 @@ def _camera_worker_thread(
         stop_event: Event to signal thread to stop
         time_reference: TimeReference instance
         status_tracker: Optional status tracker for camera status updates
+        camera_type: Camera sensor type ("rgb" or "depth", default: "rgb")
     Returns:
         None
     """
@@ -153,7 +162,7 @@ def _camera_worker_thread(
             camera_id=camera_id,
             fps=fps,
             time_reference=time_reference,
-            sensor_type="rgb",
+            sensor_type=camera_type,
         )
 
         # Monitor the threading stop_event and set async_stop_event
@@ -213,7 +222,6 @@ def cyberwave_update_worker(
     action_queue: queue.Queue,
     joint_name_to_index: Dict[str, int],
     joint_name_to_norm_mode: Dict[str, MotorNormMode],
-    use_radians: bool,
     stop_event: threading.Event,
     twin: Optional[Twin] = None,
     time_reference: TimeReference = None,
@@ -224,13 +232,13 @@ def cyberwave_update_worker(
 
     Batches multiple joint updates together and skips updates where position is 0.0.
     Velocity and effort are hardcoded to 0.0 to avoid issues.
+    Always converts positions to radians.
 
     Args:
         action_queue: Queue containing (joint_name, action_data) tuples where action_data
                      is a dict with 'position', 'velocity', 'load', and 'timestamp' keys
         joint_name_to_index: Dictionary mapping joint names to joint indexes (1-6)
         joint_name_to_norm_mode: Dictionary mapping joint names to normalization modes
-        use_radians: Whether to convert positions to radians (only for DEGREES mode)
         stop_event: Event to signal thread to stop
         twin: Optional Twin instance for updating joint states
         time_reference: TimeReference instance
@@ -275,43 +283,27 @@ def cyberwave_update_worker(
                     # Get normalization mode for this joint
                     norm_mode = joint_name_to_norm_mode.get(joint_name, MotorNormMode.DEGREES)
 
-                    # Convert normalized position to degrees/radians for Cyberwave
-                    # The position is already normalized, so we need to convert it to degrees/radians
-                    # based on the normalization mode
+                    # Convert normalized position to radians for Cyberwave
+                    # The position is already normalized, so we need to convert it to radians
+                    # based on the normalization mode (always converts to radians)
                     if norm_mode == MotorNormMode.DEGREES:
-                        # Already in degrees, just convert to radians if needed
-                        position = normalized_position
-                        if use_radians:
-                            import math
-
-                            position = normalized_position * math.pi / 180.0
+                        # Already in degrees, convert to radians
+                        position = normalized_position * math.pi / 180.0
                     elif norm_mode == MotorNormMode.RANGE_M100_100:
-                        # Convert from -100 to 100 range to degrees
-                        # Assuming full range maps to 360 degrees
+                        # Convert from -100 to 100 range to degrees, then to radians
                         position_degrees = (
                             normalized_position / 100.0
                         ) * 180.0  # -100 to 100 -> -180 to 180 degrees
-                        if use_radians:
-                            import math
-
-                            position = position_degrees * math.pi / 180.0
-                        else:
-                            position = position_degrees
+                        position = position_degrees * math.pi / 180.0
                     elif norm_mode == MotorNormMode.RANGE_0_100:
-                        # Convert from 0 to 100 range to degrees
-                        # Assuming full range maps to 360 degrees
+                        # Convert from 0 to 100 range to degrees, then to radians
                         position_degrees = (
                             normalized_position / 100.0
                         ) * 360.0  # 0 to 100 -> 0 to 360 degrees
-                        if use_radians:
-                            import math
-
-                            position = position_degrees * math.pi / 180.0
-                        else:
-                            position = position_degrees
+                        position = position_degrees * math.pi / 180.0
                     else:
-                        # Default: use as-is
-                        position = normalized_position
+                        # Default: assume degrees and convert to radians
+                        position = normalized_position * math.pi / 180.0
 
                     # Hardcode velocity and effort to 0.0 to avoid issues
                     velocity = 0.0
@@ -449,11 +441,53 @@ def _process_cyberwave_updates(
     return update_count, skip_count
 
 
+def _read_temperatures(follower: Optional[SO101Follower], joint_index_to_name: Dict[str, str]) -> Dict[str, float]:
+    """
+    Read temperatures from follower motors.
+
+    Args:
+        follower: SO101Follower instance (optional)
+        joint_index_to_name: Mapping from joint index to joint name
+
+    Returns:
+        Dictionary mapping joint_index (as string) to temperature in Celsius
+    """
+    temperatures = {}
+    if follower is None or not follower.connected:
+        return temperatures
+
+    try:
+        from motors.tables import ADDR_PRESENT_TEMPERATURE
+
+        # Read temperatures for all motors
+        motor_ids = [motor.id for motor in follower.motors.values()]
+        addr = ADDR_PRESENT_TEMPERATURE[0]  # Temperature is 1 byte
+
+        for motor_id in motor_ids:
+            try:
+                # Read temperature using 1-byte read
+                temperature, result, error = follower.bus._packet_handler.read1ByteTxRx(
+                    follower.bus._port_handler, motor_id, addr
+                )
+                if result == 0:  # COMM_SUCCESS
+                    # Convert joint index (motor ID) to string for consistency
+                    temperatures[str(motor_id)] = float(temperature)
+            except Exception:
+                # Skip if read fails
+                pass
+    except Exception:
+        # Return empty dict if anything fails
+        pass
+
+    return temperatures
+
+
 def _status_logging_thread(
     status_tracker: StatusTracker,
     stop_event: threading.Event,
     fps: int,
     camera_fps: int,
+    follower: Optional[SO101Follower] = None,
 ) -> None:
     """
     Thread that logs status information at 1 fps.
@@ -463,6 +497,7 @@ def _status_logging_thread(
         stop_event: Event to signal thread to stop
         fps: Target frames per second for teleoperation loop
         camera_fps: Frames per second for camera streaming
+        follower: Optional SO101Follower instance for reading temperatures
     """
     status_tracker.fps = fps
     status_tracker.camera_fps = camera_fps
@@ -474,6 +509,13 @@ def _status_logging_thread(
 
     try:
         while not stop_event.is_set():
+            # Read temperatures from follower if available
+            if follower is not None:
+                joint_index_to_name = status_tracker.joint_index_to_name
+                temperatures = _read_temperatures(follower, joint_index_to_name)
+                if temperatures:
+                    status_tracker.update_joint_temperatures(temperatures)
+
             status = status_tracker.get_status()
 
             # Build status display with fixed width lines
@@ -515,18 +557,19 @@ def _status_logging_thread(
             lines.append(stats.ljust(70))
             lines.append("-" * 70)
 
-            # Joint states
+            # Joint states - one motor per line with position and temperature
             if status["joint_states"]:
                 index_to_name = status_tracker.joint_index_to_name
-                joint_parts = []
+                lines.append("Motors:".ljust(70))
                 for joint_index in sorted(status["joint_states"].keys()):
                     position = status["joint_states"][joint_index]
+                    temperature = status["joint_temperatures"].get(joint_index, 0.0)
                     joint_name = index_to_name.get(joint_index, joint_index)
-                    short_name = joint_name[:3]
-                    joint_parts.append(f"{short_name}:{position:5.1f}")
-                lines.append(" ".join(joint_parts).ljust(70))
+                    # Format: "  shoulder_pan:  pos=  0.79rad  temp= 32°C"
+                    line = f"  {joint_name:16s}  pos={position:6.3f}rad  temp={temperature:3.0f}°C"
+                    lines.append(line[:70].ljust(70))
             else:
-                lines.append("Joints: (waiting)".ljust(70))
+                lines.append("Motors: (waiting)".ljust(70))
 
             lines.append("=" * 70)
             lines.append("Press 'q' to stop".ljust(70))
@@ -647,8 +690,6 @@ def _teleop_loop(
     position_threshold: float,
     velocity_threshold: float,
     effort_threshold: float,
-    log_states: bool,
-    log_states_interval: int,
     frame_time: float,
     time_reference: TimeReference,
     status_tracker: Optional[StatusTracker] = None,
@@ -666,8 +707,6 @@ def _teleop_loop(
         position_threshold: Minimum change in normalized position to trigger update
         velocity_threshold: Unused (kept for compatibility)
         effort_threshold: Unused (kept for compatibility)
-        log_states: Whether to log leader/follower states
-        log_states_interval: Interval for logging states
         frame_time: Target time per frame (1/fps)
         time_reference: TimeReference instance
         heartbeat_interval: Interval in seconds to send heartbeat if no changes (default 1.0)
@@ -676,7 +715,6 @@ def _teleop_loop(
     """
     total_update_count = 0
     total_skip_count = 0
-    iteration_count = 0
 
     # Track last send time per joint for heartbeat
     last_send_times: Dict[str, float] = {}
@@ -717,38 +755,13 @@ def _teleop_loop(
             total_skip_count += skip_count
 
             # Send action to follower if provided
-            leader_observation = None
-            follower_observation = None
             if follower is not None and leader is not None:
                 try:
                     # Send leader action to follower (follower handles safety limits and normalization)
                     follower.send_action(leader_action)
-
-                    # Get observations for logging
-                    if log_states:
-                        leader_observation = leader.get_observation()
-                        follower_observation = follower.get_observation()
-
                 except Exception:
                     if status_tracker:
                         status_tracker.increment_errors()
-
-            # Log states if enabled
-            if log_states:
-                iteration_count += 1
-                should_log = iteration_count <= 10 or iteration_count % log_states_interval == 0
-
-                if should_log:
-                    if leader_observation is None:
-                        leader_observation = leader.get_observation()
-                    if follower is not None and follower_observation is None:
-                        follower_observation = follower.get_observation()
-                    _log_leader_follower_states(
-                        leader_observation=leader_observation,
-                        follower_observation=follower_observation,
-                        leader=leader,
-                        follower=follower,
-                    )
 
             # Rate limiting
             elapsed = time.time() - loop_start
@@ -772,14 +785,12 @@ def teleoperate(
     follower: Optional[SO101Follower] = None,
     fps: int = 30,
     camera_fps: int = 30,
-    use_radians: bool = True,
     position_threshold: float = 0.1,
     velocity_threshold: float = 100.0,
     effort_threshold: float = 0.1,
-    log_states: bool = False,
-    log_states_interval: int = 30,
     robot: Optional[Twin] = None,
     camera: Optional[Twin] = None,
+    camera_type: str = "rgb",
 ) -> None:
     """
     Run teleoperation loop: read from leader, send to follower, and send follower data to Cyberwave.
@@ -787,6 +798,7 @@ def teleoperate(
     Uses a separate thread with a FIFO queue to send updates to Cyberwave,
     keeping the main loop responsive. Only sends updates when values change.
     Follower data (actual robot state) is sent to Cyberwave, not leader data.
+    Always converts positions to radians.
 
     Args:
         leader: SO101Leader instance (optional if camera_only=True)
@@ -794,14 +806,12 @@ def teleoperate(
         follower: SO101Follower instance (required when robot twin is provided)
         fps: Target frames per second for the teleoperation loop
         camera_fps: Frames per second for camera streaming
-        use_radians: If True, convert positions to radians; if False, convert to degrees (default)
-        position_threshold: Minimum change in position to trigger an update (in degrees/radians)
+        position_threshold: Minimum change in position to trigger an update (in normalized units)
         velocity_threshold: Minimum change in velocity to trigger an update
         effort_threshold: Minimum change in effort to trigger an update
-        log_states: Whether to log leader/follower states
-        log_states_interval: Interval for logging states
         robot: Robot twin instance
         camera: Camera twin instance
+        camera_type: Camera sensor type ("rgb" or "depth", default: "rgb")
     """
     time_reference = TimeReference()
 
@@ -906,7 +916,7 @@ def teleoperate(
     # Start status logging thread
     status_thread = threading.Thread(
         target=_status_logging_thread,
-        args=(status_tracker, stop_event, fps, camera_fps),
+        args=(status_tracker, stop_event, fps, camera_fps, follower),
         daemon=True,
     )
     status_thread.start()
@@ -920,7 +930,6 @@ def teleoperate(
                 action_queue,
                 joint_name_to_index,
                 joint_name_to_norm_mode,
-                use_radians,
                 stop_event,
                 robot,
                 time_reference,
@@ -945,6 +954,7 @@ def teleoperate(
                     stop_event,
                     time_reference,
                     status_tracker,
+                    camera_type,
                 ),
                 daemon=True,
             )
@@ -1014,8 +1024,6 @@ def teleoperate(
                 position_threshold=position_threshold,
                 velocity_threshold=velocity_threshold,
                 effort_threshold=effort_threshold,
-                log_states=log_states,
-                log_states_interval=log_states_interval,
                 frame_time=frame_time,
                 time_reference=time_reference,
                 status_tracker=status_tracker,
@@ -1076,29 +1084,11 @@ def main():
         help="Target frames per second (default: 30)",
     )
     parser.add_argument(
-        "--use-radians",
-        action="store_true",
-        default=True,
-        help="Convert positions to radians (default: degrees)",
-    )
-    parser.add_argument(
         "--max-relative-target",
         type=float,
         default=None,
         help="Maximum change per update for follower (raw encoder units, default: None = no limit). "
         "Set to a value to enable safety limit (e.g., 50.0 for slower/safer movement).",
-    )
-    parser.add_argument(
-        "--log-states",
-        action="store_true",
-        help="Enable logging of leader and follower states",
-    )
-    parser.add_argument(
-        "--log-states-interval",
-        type=int,
-        default=30,
-        help="Log states every N updates (default: 30, ~1 second at 30fps). "
-        "Only used if --log-states is enabled.",
     )
     parser.add_argument(
         "--camera-only",
@@ -1117,6 +1107,13 @@ def main():
         required=False,
         default=30,
         help="FPS to use for the camera (default: 30)",
+    )
+    parser.add_argument(
+        "--camera-type",
+        type=str,
+        choices=["rgb", "depth"],
+        default="rgb",
+        help="Camera sensor type: 'rgb' or 'depth' (default: 'rgb')",
     )
 
     args = parser.parse_args()
@@ -1162,11 +1159,9 @@ def main():
             follower=follower,
             fps=args.fps,
             camera_fps=args.camera_fps,
-            use_radians=args.use_radians,
-            log_states=args.log_states,
-            log_states_interval=args.log_states_interval,
             robot=robot,
             camera=camera,
+            camera_type=args.camera_type,
         )
     finally:
         if leader is not None:

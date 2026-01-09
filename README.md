@@ -81,6 +81,7 @@ so101-read-device --port /dev/tty.usbmodem123
 ```
 
 Or in continuous mode:
+
 ```bash
 so101-read-device --port /dev/tty.usbmodem123 --continuous
 ```
@@ -88,11 +89,13 @@ so101-read-device --port /dev/tty.usbmodem123 --continuous
 ### 3. Calibrate Device
 
 Calibrate a leader device:
+
 ```bash
 so101-calibrate --type leader --port /dev/tty.usbmodem123 --id leader1
 ```
 
 Calibrate a follower device:
+
 ```bash
 so101-calibrate --type follower --port /dev/tty.usbmodem456 --id follower1
 ```
@@ -155,6 +158,7 @@ so101-calibrate --type leader --port /dev/tty.usbmodem123 --id leader1 --voltage
 ```
 
 **Calibration Process:**
+
 1. Move the device to the middle of its range of motion
 2. Press ENTER to set homing offsets
 3. Move all joints through their full ranges of motion
@@ -176,21 +180,31 @@ so101-teleoperate \
     --twin-uuid YOUR_TWIN_UUID \
     --leader-port /dev/tty.usbmodem123 \
     --fps 30 \
+    --camera-fps 30
+
+# Stream depth camera instead of RGB
+so101-teleoperate \
+    --twin-uuid YOUR_TWIN_UUID \
+    --leader-port /dev/tty.usbmodem123 \
+    --fps 30 \
     --camera-fps 30 \
-    --use-radians
+    --camera-type depth
 ```
 
 **Options:**
+
 - `--twin-uuid`: UUID of the Cyberwave twin to update (required)
 - `--leader-port`: Serial port for leader device (required, unless using --camera-only)
 - `--follower-port`: Optional serial port for follower device
 - `--fps`: Target frames per second for teleoperation loop (default: 30)
 - `--camera-fps`: Frames per second for camera streaming (default: 30)
 - `--camera-uuid`: UUID of the twin to stream camera to (default: same as --twin-uuid)
-- `--use-radians`: Convert positions to radians instead of degrees (default: True)
+- `--camera-type`: Camera sensor type: 'rgb' or 'depth' (default: 'rgb')
 - `--camera-only`: Only stream camera, skip teleoperation loop (requires --follower-port)
-- `--log-states`: Enable logging of leader and follower states
-- `--log-states-interval`: Log states every N updates (default: 30)
+
+**Note:** Positions are always converted to radians for Cyberwave integration.
+
+**Note:** Positions are always converted to radians for Cyberwave integration.
 
 ## Python API
 
@@ -246,7 +260,8 @@ from cyberwave import Cyberwave
 
 # Initialize Cyberwave client (reads token from CYBERWAVE_TOKEN env var)
 cyberwave_client = Cyberwave()
-twin = cyberwave_client.twin(asset_key="the-robot-studio/so101", twin_id="YOUR_TWIN_UUID")
+robot = cyberwave_client.twin(asset_key="the-robot-studio/so101", twin_id="YOUR_TWIN_UUID", name="robot")
+camera = cyberwave_client.twin(asset_key="cyberwave/standard-cam", twin_id="YOUR_TWIN_UUID", name="camera")
 
 # Initialize leader
 leader_config = LeaderConfig(port="/dev/tty.usbmodem123", id="leader1")
@@ -263,12 +278,12 @@ try:
     teleoperate(
         leader=leader,
         cyberwave_client=cyberwave_client,
-        twin_uuid="YOUR_TWIN_UUID",
         follower=follower,  # Optional
         fps=30,
         camera_fps=30,  # Separate FPS for camera streaming
-        use_radians=True,  # Default is True
-        twin=twin,
+        robot=robot,  # Robot twin instance
+        camera=camera,  # Camera twin instance (optional)
+        camera_type="rgb",  # Camera sensor type: "rgb" or "depth" (default: "rgb")
     )
 finally:
     leader.disconnect()
@@ -302,6 +317,7 @@ Calibration files are saved as JSON in `~/.so101_lib/calibrations/{id}.json`:
 ```
 
 **Fields:**
+
 - `id`: Motor ID (1-6)
 - `drive_mode`: Drive mode (0 = normal, 1 = reversed)
 - `homing_offset`: Homing offset value (raw encoder units)
@@ -313,25 +329,30 @@ Calibration files are saved as JSON in `~/.so101_lib/calibrations/{id}.json`:
 The library supports three normalization modes:
 
 ### `RANGE_M100_100`
+
 Normalizes positions to the range [-100, 100] based on calibrated min/max.
 
 **Formula:** `norm = (((bounded_val - min_) / (max_ - min_)) * 200) - 100`
 
 ### `RANGE_0_100`
+
 Normalizes positions to the range [0, 100] based on calibrated min/max.
 
 **Formula:** `norm = ((bounded_val - min_) / (max_ - min_)) * 100`
 
 ### `DEGREES`
+
 Converts positions to degrees relative to the calibrated center.
 
 **Formula:** `degrees = (raw_encoder_value - mid) * 360 / 4095`
 
 Where:
+
 - `mid = (range_min + range_max) / 2` (center of calibrated range)
 - `max_res = 4095` (12-bit encoder resolution)
 
 **Characteristics:**
+
 - 0 degrees is at the midpoint of the calibrated range
 - Values can be negative (below center) or positive (above center)
 - Theoretical maximum: ±180 degrees if using full encoder range (0-4095)
@@ -342,6 +363,7 @@ Where:
 ### Core Components
 
 - **`motors/`**: Motor bus layer and data models
+
   - `bus.py`: Abstract base class for motor buses
   - `feetech_bus.py`: Feetech STS3215 implementation
   - `models.py`: Motor and calibration data models
@@ -357,6 +379,7 @@ Where:
 ### Motor Configuration
 
 The SO101 has 6 motors:
+
 - `shoulder_pan` (ID: 1)
 - `shoulder_lift` (ID: 2)
 - `elbow_flex` (ID: 3)
@@ -403,6 +426,7 @@ config = FollowerConfig(
 ### Port Not Found
 
 If you can't find your device port:
+
 ```bash
 so101-find-port
 ```
@@ -412,11 +436,13 @@ This will list available ports and help you identify the correct one.
 ### Calibration Required
 
 Teleoperation requires a valid calibration file. If you see:
+
 ```
 RuntimeError: No calibration file found at ...
 ```
 
 Run calibration first:
+
 ```bash
 so101-calibrate --type leader --port /dev/tty.usbmodem123 --id leader1
 ```
@@ -424,11 +450,13 @@ so101-calibrate --type leader --port /dev/tty.usbmodem123 --id leader1
 ### Environment Variables Not Set
 
 If you see errors about missing Cyberwave token:
+
 ```
 ValueError: No CYBERWAVE_API_KEY found! Get yours at https://cyberwave.com/profile
 ```
 
 Set the required environment variable:
+
 ```bash
 export CYBERWAVE_API_KEY=your_token_here
 ```
@@ -438,6 +466,7 @@ Get your token from [https://cyberwave.com/profile](https://cyberwave.com/profil
 ### Voltage Detection
 
 The library can auto-detect voltage rating (5V or 12V) from motor registers. If detection fails, you can specify it manually:
+
 ```bash
 so101-calibrate --type leader --port /dev/tty.usbmodem123 --id leader1 --voltage-rating 5
 ```
