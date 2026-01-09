@@ -103,6 +103,7 @@ so101-calibrate --type follower --port /dev/tty.usbmodem456 --id follower1
 so101-teleoperate \
     --twin-uuid YOUR_TWIN_UUID \
     --leader-port /dev/tty.usbmodem123 \
+    --follower-port /dev/tty.usbmodem456 \
     --fps 30
 ```
 

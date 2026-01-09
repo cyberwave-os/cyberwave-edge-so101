@@ -14,6 +14,7 @@ from typing import Dict, Optional
 from cyberwave import Cyberwave, Twin
 from cyberwave.utils import TimeReference
 
+from dotenv import load_dotenv
 from follower import SO101Follower
 from motors import MotorNormMode
 from utils import setup_logging
@@ -155,7 +156,7 @@ def _keyboard_input_thread(stop_event: threading.Event) -> None:
                 while not stop_event.is_set():
                     if select.select([sys.stdin], [], [], 0.1)[0]:
                         char = sys.stdin.read(1)
-                        if char == 'q' or char == 'Q':
+                        if char == "q" or char == "Q":
                             logger.info("\n'q' key pressed - stopping remote operation loop...")
                             stop_event.set()
                             break
@@ -208,8 +209,7 @@ def _motor_writer_worker(
                     # Get initial current positions (only once, at the start)
                     present_pos = follower.get_observation()
                     current_pos = {
-                        key.removesuffix(".pos"): val
-                        for key, val in present_pos.items()
+                        key.removesuffix(".pos"): val for key, val in present_pos.items()
                     }
 
                     # Extract goal positions from action
@@ -268,9 +268,7 @@ def _motor_writer_worker(
                             current_pos[name] = pos
 
                         # Convert back to action format with .pos suffix
-                        safe_action = {
-                            f"{name}.pos": pos for name, pos in safe_goal_pos.items()
-                        }
+                        safe_action = {f"{name}.pos": pos for name, pos in safe_goal_pos.items()}
 
                         # Temporarily disable max_relative_target in follower to avoid double-clamping
                         original_max_relative = follower.config.max_relative_target
@@ -279,10 +277,11 @@ def _motor_writer_worker(
                         try:
                             # Send the safe action directly to bus
                             goal_pos_for_bus = {
-                                key.removesuffix(".pos"): val
-                                for key, val in safe_action.items()
+                                key.removesuffix(".pos"): val for key, val in safe_action.items()
                             }
-                            follower.bus.sync_write("Goal_Position", goal_pos_for_bus, normalize=True)
+                            follower.bus.sync_write(
+                                "Goal_Position", goal_pos_for_bus, normalize=True
+                            )
                             processed_count += 1
                             logger.debug(
                                 f"Sent step {step + 1}/{max_steps} to follower: {safe_action}"
@@ -381,7 +380,9 @@ def _create_joint_state_callback(
 
             # Extract joint_name and joint_state
             if "joint_name" not in data or "joint_state" not in data:
-                logger.warning(f"Joint state update missing required fields (joint_name or joint_state): {data}")
+                logger.warning(
+                    f"Joint state update missing required fields (joint_name or joint_state): {data}"
+                )
                 return
 
             joint_name_str = data.get("joint_name")
@@ -389,7 +390,9 @@ def _create_joint_state_callback(
             position_radians = joint_state.get("position")
 
             if position_radians is None:
-                logger.warning(f"Joint state update missing 'position' field in joint_state: {data}")
+                logger.warning(
+                    f"Joint state update missing 'position' field in joint_state: {data}"
+                )
                 return
 
             # Convert joint_name to joint_index
@@ -592,6 +595,9 @@ def remoteoperate(
             observations=observations,
         )
         logger.info(f"Initial observation sent to Cyberwave twin {twin_uuid}, {len(observations)} joints updated")
+        logger.info(
+            f"Initial observation sent to Cyberwave twin {twin_uuid}, {len(follower_obs)} joints updated"
+        )
 
     except Exception as e:
         logger.error(f"Error sending initial observation: {e}", exc_info=True)
@@ -693,9 +699,8 @@ def remoteoperate(
 
 def main():
     """Main entry point for remote operation script."""
-    parser = argparse.ArgumentParser(
-        description="Remote operate SO101 follower via Cyberwave MQTT"
-    )
+    load_dotenv()
+    parser = argparse.ArgumentParser(description="Remote operate SO101 follower via Cyberwave MQTT")
     parser.add_argument(
         "--twin-uuid",
         type=str,

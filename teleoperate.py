@@ -10,6 +10,8 @@ import threading
 import time
 from typing import Dict, Optional
 
+from dotenv import load_dotenv
+
 from cyberwave import Cyberwave, Twin
 from cyberwave.utils import TimeReference
 
@@ -27,7 +29,7 @@ def _camera_worker_thread(
     fps: int,
     twin_uuid: str,
     stop_event: threading.Event,
-    time_reference: TimeReference
+    time_reference: TimeReference,
 ) -> None:
     """
     Worker thread that handles camera streaming.
@@ -67,15 +69,17 @@ def _camera_worker_thread(
             while not stop_event.is_set():
                 await asyncio.sleep(0.1)
             async_stop_event.set()
-        
+
         # Start the monitor task
         monitor_task = asyncio.create_task(monitor_stop())
-        
+
         try:
             # Run with auto-reconnect - this handles all command subscriptions internally
             await streamer.run_with_auto_reconnect(
                 stop_event=async_stop_event,
-                command_callback=lambda status, msg: logger.info(f"Camera command: {status} - {msg}"),
+                command_callback=lambda status, msg: logger.info(
+                    f"Camera command: {status} - {msg}"
+                ),
             )
         finally:
             monitor_task.cancel()
@@ -83,7 +87,7 @@ def _camera_worker_thread(
                 await monitor_task
             except asyncio.CancelledError:
                 pass
-    
+
     # Run async function in event loop
     loop = None
     try:
@@ -98,7 +102,6 @@ def _camera_worker_thread(
                 loop.close()
             except Exception as e:
                 logger.error(f"Error closing event loop: {e}", exc_info=True)
-
 
 
 def cyberwave_update_worker(
@@ -177,22 +180,29 @@ def cyberwave_update_worker(
                         position = normalized_position
                         if use_radians:
                             import math
+
                             position = normalized_position * math.pi / 180.0
                     elif norm_mode == MotorNormMode.RANGE_M100_100:
                         # Convert from -100 to 100 range to degrees
                         # Assuming full range maps to 360 degrees
-                        position_degrees = (normalized_position / 100.0) * 180.0  # -100 to 100 -> -180 to 180 degrees
+                        position_degrees = (
+                            normalized_position / 100.0
+                        ) * 180.0  # -100 to 100 -> -180 to 180 degrees
                         if use_radians:
                             import math
+
                             position = position_degrees * math.pi / 180.0
                         else:
                             position = position_degrees
                     elif norm_mode == MotorNormMode.RANGE_0_100:
                         # Convert from 0 to 100 range to degrees
                         # Assuming full range maps to 360 degrees
-                        position_degrees = (normalized_position / 100.0) * 360.0  # 0 to 100 -> 0 to 360 degrees
+                        position_degrees = (
+                            normalized_position / 100.0
+                        ) * 360.0  # 0 to 100 -> 0 to 360 degrees
                         if use_radians:
                             import math
+
                             position = position_degrees * math.pi / 180.0
                         else:
                             position = position_degrees
@@ -218,7 +228,7 @@ def cyberwave_update_worker(
                     joint_index_str = str(joint_name_to_index.get(joint_name, "unknown"))
                     logger.warning(
                         f"Failed to process joint {joint_name} (index {joint_index_str}): {e}",
-                        exc_info=True
+                        exc_info=True,
                     )
                     action_queue.task_done()
 
@@ -227,13 +237,18 @@ def cyberwave_update_worker(
                 try:
                     # Send all joints in the batch
                     for joint_index, (position, _, _, timestamp) in batch_updates.items():
-                        twin.joints.set(joint_name=str(joint_index), position=position, degrees=False, timestamp=timestamp)
+                        twin.joints.set(
+                            joint_name=str(joint_index),
+                            position=position,
+                            degrees=False,
+                            timestamp=timestamp,
+                        )
                     processed_count += len(batch_updates)
                 except Exception as e:
                     error_count += len(batch_updates)
                     logger.warning(
                         f"Failed to send batch update for {len(batch_updates)} joints: {e}",
-                        exc_info=True
+                        exc_info=True,
                     )
 
         except Exception as e:
@@ -314,6 +329,7 @@ def _process_cyberwave_updates(
 
     return update_count, skip_count
 
+
 def _log_leader_follower_states(
     leader_observation: Dict[str, float],
     follower_observation: Optional[Dict[str, float]],
@@ -392,7 +408,7 @@ def _keyboard_input_thread(stop_event: threading.Event) -> None:
                 while not stop_event.is_set():
                     if select.select([sys.stdin], [], [], 0.1)[0]:
                         char = sys.stdin.read(1)
-                        if char == 'q' or char == 'Q':
+                        if char == "q" or char == "Q":
                             logger.info("\n'q' key pressed - stopping teleoperation loop...")
                             stop_event.set()
                             break
@@ -489,10 +505,7 @@ def _teleop_loop(
             # Log states if enabled
             if log_states:
                 iteration_count += 1
-                should_log = (
-                    iteration_count <= 10 or
-                    iteration_count % log_states_interval == 0
-                )
+                should_log = iteration_count <= 10 or iteration_count % log_states_interval == 0
 
                 if should_log:
                     if leader_observation is None:
@@ -509,7 +522,9 @@ def _teleop_loop(
             # Rate limiting
             elapsed = time.time() - loop_start
             sleep_time = frame_time - elapsed
-            logger.debug(f"Elapsed time: {elapsed:.4f}s, target: {frame_time:.4f}s, sleep time: {sleep_time:.4f}s")
+            logger.debug(
+                f"Elapsed time: {elapsed:.4f}s, target: {frame_time:.4f}s, sleep time: {sleep_time:.4f}s"
+            )
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
@@ -646,7 +661,15 @@ def teleoperate(
     if robot is not None:
         worker_thread = threading.Thread(
             target=cyberwave_update_worker,
-            args=(action_queue, joint_name_to_index, joint_name_to_norm_mode, use_radians, stop_event, robot, time_reference),
+            args=(
+                action_queue,
+                joint_name_to_index,
+                joint_name_to_norm_mode,
+                use_radians,
+                stop_event,
+                robot,
+                time_reference,
+            ),
             daemon=True,
         )
         worker_thread.start()
@@ -659,11 +682,20 @@ def teleoperate(
             camera_id = follower.config.cameras[0]
             camera_thread = threading.Thread(
                 target=_camera_worker_thread,
-                args=(cyberwave_client, camera_id, camera_fps, camera.uuid, stop_event, time_reference),
+                args=(
+                    cyberwave_client,
+                    camera_id,
+                    camera_fps,
+                    camera.uuid,
+                    stop_event,
+                    time_reference,
+                ),
                 daemon=True,
             )
             camera_thread.start()
-            logger.info(f"Started camera streaming thread (camera ID: {camera_id}, FPS: {camera_fps})")
+            logger.info(
+                f"Started camera streaming thread (camera ID: {camera_id}, FPS: {camera_fps})"
+            )
         else:
             logger.debug("Follower has no cameras configured, skipping camera streaming")
 
@@ -676,9 +708,18 @@ def teleoperate(
         f"velocity={velocity_threshold}, effort={effort_threshold}"
     )
     try:
-        if leader is not None and robot is not None and mqtt_client is not None and time_reference is not None:
+        if (
+            leader is not None
+            and robot is not None
+            and mqtt_client is not None
+            and time_reference is not None
+        ):
             actions = leader.get_action()
-            actions = {key.removesuffix(".pos"): val for key, val in actions.items() if key.endswith(".pos")}
+            actions = {
+                key.removesuffix(".pos"): val
+                for key, val in actions.items()
+                if key.endswith(".pos")
+            }
             # Use joint_name_to_index to convert actions to joint indexes
             actions = {joint_name_to_index[key]: val for key, val in actions.items()}
             # Send actions to Cyberwave as single update
@@ -686,7 +727,9 @@ def teleoperate(
                 twin_uuid=robot.uuid,
                 observations=actions,
             )
-            logger.info(f"Initial observation sent to Cyberwave twin {robot.uuid}, {len(actions)} joints updated")
+            logger.info(
+                f"Initial observation sent to Cyberwave twin {robot.uuid}, {len(actions)} joints updated"
+            )
 
     except Exception as e:
         logger.error(f"Error getting leader actions: {e}", exc_info=True)
@@ -753,6 +796,9 @@ def teleoperate(
 
 def main():
     """Main entry point for teleoperation script."""
+    # Load environment variables from .env file
+    load_dotenv()
+
     parser = argparse.ArgumentParser(
         description="Teleoperate SO101 leader and update Cyberwave twin"
     )
@@ -873,7 +919,7 @@ def main():
             log_states=args.log_states,
             log_states_interval=args.log_states_interval,
             robot=robot,
-            camera=camera
+            camera=camera,
         )
     finally:
         if leader is not None:
