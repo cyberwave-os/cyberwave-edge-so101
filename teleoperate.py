@@ -434,49 +434,57 @@ def _status_logging_thread(
     while not stop_event.is_set():
         status = status_tracker.get_status()
 
-        # Clear previous status (using ANSI escape codes)
-        print("\033[2J\033[H", end="")  # Clear screen and move cursor to top
+        # Build complete status message as single string
+        output_lines = []
+        output_lines.append("\033[2J\033[H")  # Clear screen, move to top
 
-        # Script status
+        # Status header
         script_status = "🟡 Starting" if not status["script_started"] else "🟢 Running"
-        print(f"Script:  {script_status}")
+        output_lines.append(f"Script:  {script_status}\n")
 
-        # MQTT status
         mqtt_status = "🟢 Connected" if status["mqtt_connected"] else "🔴 Disconnected"
-        print(f"MQTT:    {mqtt_status}")
+        output_lines.append(f"MQTT:    {mqtt_status}\n")
 
-        # Camera status
         if not status["camera_detected"]:
             camera_status = "🔴 No camera detected"
         elif not status["camera_started"]:
             camera_status = "🟡 Camera detected (not started)"
         else:
             camera_status = "🟢 Camera streaming"
-        print(f"Camera:  {camera_status}")
+        output_lines.append(f"Camera:  {camera_status}\n")
 
-        # WebRTC status
         webrtc_status = "🟢 Connected" if status["webrtc_connected"] else "🔴 Disconnected"
-        print(f"WebRTC:  {webrtc_status}")
+        output_lines.append(f"WebRTC:  {webrtc_status}\n")
 
         # Statistics
-        print("\nStats:")
-        print(f"  FPS:        {status['fps']}")
-        print(f"  Camera FPS: {status['camera_fps']}")
-        print(f"  Produced:   {status['messages_produced']}")
-        print(f"  Filtered:   {status['messages_filtered']}")
-        print(f"  Errors:     {status['errors']}")
+        output_lines.append("\nStats:\n")
+        output_lines.append(f"  FPS:        {status['fps']}\n")
+        output_lines.append(f"  Camera FPS: {status['camera_fps']}\n")
+        output_lines.append(f"  Produced:   {status['messages_produced']}\n")
+        output_lines.append(f"  Filtered:   {status['messages_filtered']}\n")
+        output_lines.append(f"  Errors:     {status['errors']}\n")
 
         # Joint states
         if status["joint_states"]:
-            print("\nJoint States:")
-            # Get joint index to name mapping
+            output_lines.append("\nJoint States:\n")
             index_to_name = status_tracker.joint_index_to_name
             for joint_index in sorted(status["joint_states"].keys()):
                 position = status["joint_states"][joint_index]
                 joint_name = index_to_name.get(joint_index, joint_index)
-                print(f"  {joint_name:12s}: {position:8.3f}")
+                output_lines.append(f"  {joint_name:12s}: {position:8.3f}\n")
+        else:
+            output_lines.append("\nJoint States:\n")
 
-        print("\nPress 'q' to stop")
+        output_lines.append("\nPress 'q' to stop\n")
+
+        # Write everything in one atomic operation to stderr to avoid logger interference
+        output = "".join(output_lines)
+        try:
+            sys.stderr.write(output)
+            sys.stderr.flush()
+        except (IOError, OSError):
+            # Ignore write errors (e.g., if stderr is redirected)
+            pass
 
         # Wait for next update
         time.sleep(status_interval)
