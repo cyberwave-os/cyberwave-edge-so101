@@ -18,7 +18,6 @@ from cyberwave.utils import TimeReference
 from follower import SO101Follower
 from leader import SO101Leader
 from motors import MotorNormMode
-from utils import setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -544,8 +543,8 @@ def _log_leader_follower_states(
             leader_val = leader_observation.get(name, 0.0)
             lines.append(f"  {name:16s} | Position: {int(leader_val):4d}")
     lines.append("\n")
-    message = "\n".join(lines)
-    logger.info(message)
+    # Logging disabled for clean status display
+    pass
 
 
 def _keyboard_input_thread(stop_event: threading.Event) -> None:
@@ -574,8 +573,7 @@ def _keyboard_input_thread(stop_event: threading.Event) -> None:
             finally:
                 termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
         except (ImportError, OSError):
-            # If termios is not available (e.g., Windows), fall back to simple input
-            logger.debug("Termios not available, keyboard input disabled")
+            # If termios is not available (e.g., Windows), keyboard input disabled
             pass
 
 
@@ -659,8 +657,9 @@ def _teleop_loop(
                             leader_observation = leader.get_observation()
                         follower_observation = follower.get_observation()
 
-                except Exception as e:
-                    logger.error(f"Error sending action to follower: {e}", exc_info=True)
+                except Exception:
+                    if status_tracker:
+                        status_tracker.increment_errors()
 
             # Log states if enabled
             if log_states:
@@ -731,13 +730,10 @@ def teleoperate(
         robot: Robot twin instance
         camera: Camera twin instance
     """
-    setup_logging()
     time_reference = TimeReference()
 
-    # Suppress cyberwave loggers to avoid interfering with status display
-    logging.getLogger("cyberwave").setLevel(logging.WARNING)
-    logging.getLogger("cyberwave.mqtt").setLevel(logging.WARNING)
-    logging.getLogger("cyberwave.camera").setLevel(logging.WARNING)
+    # Disable all logging to avoid interfering with status display
+    logging.disable(logging.CRITICAL)
 
     # Create status tracker
     status_tracker = StatusTracker()
