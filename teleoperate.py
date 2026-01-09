@@ -522,8 +522,9 @@ def _status_logging_thread(
             lines.append("Press 'q' to stop".ljust(70))
 
             # Clear screen and move to top, then write all lines
+            # Use \r\n for proper line breaks in raw terminal mode
             output = "\033[2J\033[H"  # Clear screen and move to home
-            output += "\n".join(lines)
+            output += "\r\n".join(lines)
 
             try:
                 sys.stdout.write(output)
