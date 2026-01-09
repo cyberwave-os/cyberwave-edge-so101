@@ -734,6 +734,11 @@ def teleoperate(
     setup_logging()
     time_reference = TimeReference()
 
+    # Suppress cyberwave loggers to avoid interfering with status display
+    logging.getLogger("cyberwave").setLevel(logging.WARNING)
+    logging.getLogger("cyberwave.mqtt").setLevel(logging.WARNING)
+    logging.getLogger("cyberwave.camera").setLevel(logging.WARNING)
+
     # Create status tracker
     status_tracker = StatusTracker()
     status_tracker.script_started = True
