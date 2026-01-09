@@ -430,59 +430,66 @@ def _status_logging_thread(
     status_tracker.camera_fps = camera_fps
     status_interval = 1.0  # Update status at 1 fps
 
+    # Number of lines in our display (for cursor movement)
+    num_lines = 10
+
+    # Print initial blank lines
+    print("\n" * num_lines)
+
     while not stop_event.is_set():
         status = status_tracker.get_status()
 
-        # Build complete status message as single string
-        output_lines = []
-        output_lines.append("\033[2J\033[H")  # Clear screen, move to top
+        # Build status display with fixed width lines
+        lines = []
+        lines.append("=" * 60)
+        lines.append("SO101 Teleoperation Status".center(60))
+        lines.append("=" * 60)
 
-        # Status header
-        script_status = "🟡 Starting" if not status["script_started"] else "🟢 Running"
-        output_lines.append(f"Script:  {script_status}\n")
-
-        mqtt_status = "🟢 Connected" if status["mqtt_connected"] else "🔴 Disconnected"
-        output_lines.append(f"MQTT:    {mqtt_status}\n")
-
+        # Status indicators
+        script_icon = "🟢" if status["script_started"] else "🟡"
+        mqtt_icon = "🟢" if status["mqtt_connected"] else "🔴"
         if not status["camera_detected"]:
-            camera_status = "🔴 No camera detected"
+            camera_icon = "🔴"
         elif not status["camera_started"]:
-            camera_status = "🟡 Camera detected (not started)"
+            camera_icon = "🟡"
         else:
-            camera_status = "🟢 Camera streaming"
-        output_lines.append(f"Camera:  {camera_status}\n")
+            camera_icon = "🟢"
+        webrtc_icon = "🟢" if status["webrtc_connected"] else "🔴"
 
-        webrtc_status = "🟢 Connected" if status["webrtc_connected"] else "🔴 Disconnected"
-        output_lines.append(f"WebRTC:  {webrtc_status}\n")
+        lines.append(f"Script:{script_icon} MQTT:{mqtt_icon} Camera:{camera_icon} WebRTC:{webrtc_icon}".ljust(60))
+        lines.append("-" * 60)
 
         # Statistics
-        output_lines.append("\nStats:\n")
-        output_lines.append(f"  FPS:        {status['fps']}\n")
-        output_lines.append(f"  Camera FPS: {status['camera_fps']}\n")
-        output_lines.append(f"  Produced:   {status['messages_produced']}\n")
-        output_lines.append(f"  Filtered:   {status['messages_filtered']}\n")
-        output_lines.append(f"  Errors:     {status['errors']}\n")
+        stats = f"FPS:{status['fps']} Cam:{status['camera_fps']} Prod:{status['messages_produced']} Filt:{status['messages_filtered']} Err:{status['errors']}"
+        lines.append(stats.ljust(60))
+        lines.append("-" * 60)
 
         # Joint states
         if status["joint_states"]:
-            output_lines.append("\nJoint States:\n")
             index_to_name = status_tracker.joint_index_to_name
+            joint_parts = []
             for joint_index in sorted(status["joint_states"].keys()):
                 position = status["joint_states"][joint_index]
                 joint_name = index_to_name.get(joint_index, joint_index)
-                output_lines.append(f"  {joint_name:12s}: {position:8.3f}\n")
+                short_name = joint_name[:3]
+                joint_parts.append(f"{short_name}:{position:5.1f}")
+            lines.append(" ".join(joint_parts).ljust(60))
         else:
-            output_lines.append("\nJoint States:\n")
+            lines.append("Joints: (waiting)".ljust(60))
 
-        output_lines.append("\nPress 'q' to stop\n")
+        lines.append("=" * 60)
+        lines.append("Press 'q' to stop".ljust(60))
 
-        # Write everything in one atomic operation to stderr to avoid logger interference
-        output = "".join(output_lines)
+        # Build output with carriage returns to overwrite each line
+        # Move cursor up N lines, then write each line with \r\n
+        output = f"\033[{num_lines}A"  # Move cursor up
+        for line in lines:
+            output += f"\r{line}\033[K\n"  # Carriage return, line, clear to end, newline
+
         try:
-            sys.stderr.write(output)
-            sys.stderr.flush()
+            sys.stdout.write(output)
+            sys.stdout.flush()
         except (IOError, OSError):
-            # Ignore write errors (e.g., if stderr is redirected)
             pass
 
         # Wait for next update
