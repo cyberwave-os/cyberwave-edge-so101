@@ -346,11 +346,14 @@ def _process_cyberwave_updates(
     effort_threshold: float,
     timestamp: float,
     status_tracker: Optional[StatusTracker] = None,
+    last_send_times: Optional[Dict[str, float]] = None,
+    heartbeat_interval: float = 1.0,
 ) -> tuple[int, int]:
     """
     Process leader action and queue Cyberwave updates for changed joints.
 
-    Leader action is now normalized positions
+    Leader action is now normalized positions. If a joint hasn't been sent
+    for heartbeat_interval seconds, it will be sent anyway as a heartbeat.
 
     Args:
         action: Leader action dictionary with normalized positions (keys have .pos suffix)
@@ -361,11 +364,14 @@ def _process_cyberwave_updates(
         effort_threshold: Unused (kept for compatibility)
         timestamp: Timestamp to associate with this update (generated in teleop loop)
         status_tracker: Optional status tracker for statistics
+        last_send_times: Dictionary tracking last send time per joint (for heartbeat)
+        heartbeat_interval: Interval in seconds to send heartbeat if no changes (default 1.0)
     Returns:
         Tuple of (update_count, skip_count)
     """
     update_count = 0
     skip_count = 0
+    current_time = time.time()
 
     for joint_key, normalized_pos in action.items():
         # Extract joint name from key (remove .pos suffix if present)
@@ -375,6 +381,9 @@ def _process_cyberwave_updates(
             # New joint, initialize and send
             last_observation[joint_name] = float("inf")
 
+        if last_send_times is not None and joint_name not in last_send_times:
+            last_send_times[joint_name] = 0.0
+
         last_obs = last_observation[joint_name]
 
         # Check if position has changed beyond threshold (using normalized values)
@@ -383,9 +392,19 @@ def _process_cyberwave_updates(
         # Force first update (when last_obs is inf)
         is_first_update = last_obs == float("inf")
 
-        if is_first_update or pos_changed:
+        # Check if heartbeat is needed (no update sent for heartbeat_interval)
+        needs_heartbeat = False
+        if last_send_times is not None:
+            time_since_last_send = current_time - last_send_times.get(joint_name, 0.0)
+            needs_heartbeat = time_since_last_send >= heartbeat_interval
+
+        if is_first_update or pos_changed or needs_heartbeat:
             # Update last observation (store normalized position)
             last_observation[joint_name] = normalized_pos
+
+            # Update last send time
+            if last_send_times is not None:
+                last_send_times[joint_name] = current_time
 
             # Queue action for Cyberwave update (non-blocking)
             # Format: (joint_name, {"position": normalized_pos, "velocity": 0.0, "load": 0.0, "timestamp": timestamp})
@@ -598,6 +617,7 @@ def _teleop_loop(
     frame_time: float,
     time_reference: TimeReference,
     status_tracker: Optional[StatusTracker] = None,
+    heartbeat_interval: float = 1.0,
 ) -> tuple[int, int]:
     """
     Main teleoperation loop: read from leader, send to follower, and queue Cyberwave updates.
@@ -615,12 +635,16 @@ def _teleop_loop(
         log_states_interval: Interval for logging states
         frame_time: Target time per frame (1/fps)
         time_reference: TimeReference instance
+        heartbeat_interval: Interval in seconds to send heartbeat if no changes (default 1.0)
     Returns:
         Tuple of (update_count, skip_count)
     """
     total_update_count = 0
     total_skip_count = 0
     iteration_count = 0
+
+    # Track last send time per joint for heartbeat
+    last_send_times: Dict[str, float] = {}
 
     try:
         while not stop_event.is_set():
@@ -643,6 +667,8 @@ def _teleop_loop(
                 effort_threshold=effort_threshold,
                 timestamp=timestamp,  # Pass timestamp to processing function
                 status_tracker=status_tracker,
+                last_send_times=last_send_times,
+                heartbeat_interval=heartbeat_interval,
             )
             total_update_count += update_count
             total_skip_count += skip_count
