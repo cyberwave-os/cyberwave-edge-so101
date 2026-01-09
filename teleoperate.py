@@ -239,7 +239,6 @@ def cyberwave_update_worker(
     """
     processed_count = 0
     error_count = 0
-    filtered_count = 0
     batch_timeout = 0.01  # 10ms - collect updates for batching
 
     while not stop_event.is_set():
@@ -316,14 +315,6 @@ def cyberwave_update_worker(
                     # Hardcode velocity and effort to 0.0 to avoid issues
                     velocity = 0.0
                     effort = 0.0
-
-                    # Skip if position is 0.0 (or very close to 0)
-                    if abs(position) < 1e-6:
-                        filtered_count += 1
-                        if status_tracker:
-                            status_tracker.increment_filtered()
-                        action_queue.task_done()
-                        continue
 
                     # Store in batch (overwrite if same joint appears multiple times)
                     batch_updates[joint_index] = (position, velocity, effort, timestamp)
