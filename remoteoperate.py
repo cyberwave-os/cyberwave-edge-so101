@@ -1,6 +1,7 @@
 """Remote operation loop for SO101 follower via Cyberwave MQTT."""
 
 import argparse
+import asyncio
 import logging
 import math
 import queue
@@ -8,9 +9,11 @@ import select
 import sys
 import threading
 import time
-from typing import Dict
+from typing import Dict, Optional
 
-from cyberwave import Cyberwave
+from cyberwave import Cyberwave, Twin
+from cyberwave.utils import TimeReference
+
 from dotenv import load_dotenv
 from follower import SO101Follower
 from motors import MotorNormMode
@@ -18,6 +21,85 @@ from utils import setup_logging
 from write_position import validate_position
 
 logger = logging.getLogger(__name__)
+
+
+def _camera_worker_thread(
+    client: Cyberwave,
+    camera_id: int,
+    fps: int,
+    twin_uuid: str,
+    stop_event: threading.Event,
+    time_reference: TimeReference
+) -> None:
+    """
+    Worker thread that handles camera streaming.
+
+    Runs an async event loop in a separate thread to handle camera streaming.
+    Uses CameraStreamer.run_with_auto_reconnect() for automatic command handling
+    and reconnection.
+
+    Args:
+        client: Cyberwave client instance
+        camera_id: Camera index to stream
+        fps: Frames per second for camera stream
+        twin_uuid: UUID of the twin to stream to
+        stop_event: Event to signal thread to stop
+        time_reference: TimeReference instance
+    Returns:
+        None
+    """
+    logger.debug("Camera worker thread started")
+
+    async def _run_camera_streamer():
+        """Async function that runs the camera streamer with auto-reconnect."""
+        # Create async stop event from threading.Event
+        async_stop_event = asyncio.Event()
+
+        # Create camera streamer using the SDK API
+        streamer = client.video_stream(
+            twin_uuid=twin_uuid,
+            camera_id=camera_id,
+            fps=fps,
+            time_reference=time_reference,
+            sensor_type="rgb",
+        )
+
+        # Monitor the threading stop_event and set async_stop_event
+        async def monitor_stop():
+            while not stop_event.is_set():
+                await asyncio.sleep(0.1)
+            async_stop_event.set()
+
+        # Start the monitor task
+        monitor_task = asyncio.create_task(monitor_stop())
+
+        try:
+            # Run with auto-reconnect - this handles all command subscriptions internally
+            await streamer.run_with_auto_reconnect(
+                stop_event=async_stop_event,
+                command_callback=lambda status, msg: logger.info(f"Camera command: {status} - {msg}"),
+            )
+        finally:
+            monitor_task.cancel()
+            try:
+                await monitor_task
+            except asyncio.CancelledError:
+                pass
+
+    # Run async function in event loop
+    loop = None
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_run_camera_streamer())
+    except Exception as e:
+        logger.error(f"Error in camera worker thread: {e}", exc_info=True)
+    finally:
+        if loop is not None:
+            try:
+                loop.close()
+            except Exception as e:
+                logger.error(f"Error closing event loop: {e}", exc_info=True)
 
 
 def _radians_to_normalized(radians: float, norm_mode: MotorNormMode) -> float:
@@ -101,9 +183,10 @@ def _motor_writer_worker(
         follower: SO101Follower instance
         stop_event: Event to signal thread to stop
     """
-    logger.debug("Motor writer worker thread started")
+    logger.info("Motor writer worker thread started")
     processed_count = 0
     error_count = 0
+    actions_received = 0
     from utils import ensure_safe_goal_position
 
     while not stop_event.is_set():
@@ -111,6 +194,12 @@ def _motor_writer_worker(
             # Get action from queue with timeout
             try:
                 action = action_queue.get(timeout=0.1)
+                actions_received += 1
+                logger.debug(
+                    f"[MOTOR WRITER] Received action #{actions_received} from queue "
+                    f"(queue size now: {action_queue.qsize()})"
+                )
+                logger.debug(f"[MOTOR WRITER] Action data: {action}")
             except queue.Empty:
                 continue
 
@@ -205,20 +294,37 @@ def _motor_writer_worker(
                         # The motors will catch up naturally
                 else:
                     # No max_relative_target limit, send action directly
-                    follower.send_action(action)
+                    logger.debug(f"[MOTOR WRITER] Sending action directly (no max_relative_target): {action}")
+                    sent_action = follower.send_action(action)
                     processed_count += 1
-                    logger.debug(f"Sent action to follower: {action}")
+                    logger.debug(
+                        f"[MOTOR WRITER] Action sent successfully #{processed_count}. "
+                        f"Sent: {sent_action}"
+                    )
 
             except Exception as e:
                 error_count += 1
-                logger.error(f"Error sending action to follower: {e}", exc_info=True)
+                logger.error(
+                    f"[MOTOR WRITER] Error sending action to follower (error #{error_count}): {e}",
+                    exc_info=True
+                )
             finally:
                 action_queue.task_done()
+                # Periodic summary
+                if actions_received % 5 == 0:
+                    logger.info(
+                        f"[MOTOR WRITER STATS] Received: {actions_received}, "
+                        f"Processed: {processed_count}, Errors: {error_count}, "
+                        f"Queue size: {action_queue.qsize()}"
+                    )
 
         except Exception as e:
-            logger.error(f"Error in motor writer worker: {e}", exc_info=True)
+            logger.error(f"[MOTOR WRITER] Error in worker loop: {e}", exc_info=True)
 
-    logger.info(f"Motor writer worker stopped. Processed: {processed_count}, Errors: {error_count}")
+    logger.info(
+        f"[MOTOR WRITER] Worker stopped. Total received: {actions_received}, "
+        f"Processed: {processed_count}, Errors: {error_count}"
+    )
 
 
 def _create_joint_state_callback(
@@ -241,6 +347,8 @@ def _create_joint_state_callback(
     Returns:
         Callback function for MQTT joint state updates
     """
+    # Track message count for debugging
+    message_count = {"total": 0, "processed": 0, "filtered": 0, "invalid": 0, "queued": 0}
 
     def callback(topic: str, data: Dict) -> None:
         """
@@ -251,13 +359,20 @@ def _create_joint_state_callback(
             data: Dictionary containing joint state update
                   Expected format: {"joint_name": "5", "joint_state": {"position": -1.22, "velocity": 0, "effort": 0}, "timestamp": ...}
         """
+        message_count["total"] += 1
         try:
+            # Log every message received (even if filtered)
+            logger.debug(f"[MSG #{message_count['total']}] Received on topic: {topic}")
+            logger.debug(f"[MSG #{message_count['total']}] Raw data: {data}")
+
             # Check if topic ends with "update" - only process update messages
             if not topic.endswith("/update"):
-                logger.debug(f"Ignoring message on topic {topic} (not an update message)")
+                message_count["filtered"] += 1
+                logger.debug(f"[MSG #{message_count['total']}] FILTERED - topic does not end with '/update'")
                 return
 
-            logger.debug(f"Received joint state update on topic {topic}: {data}")
+            message_count["processed"] += 1
+            logger.debug(f"[MSG #{message_count['total']}] Processing message (processed: {message_count['processed']})")
 
             # Extract joint index/name and position from data
             # Message format:
@@ -316,13 +431,22 @@ def _create_joint_state_callback(
 
             # Convert radians to normalized position
             normalized_position = _radians_to_normalized(position_radians, norm_mode)
+            logger.debug(
+                f"[MSG #{message_count['total']}] Conversion: {position_radians:.4f} rad -> "
+                f"{normalized_position:.2f} normalized (mode: {norm_mode})"
+            )
 
             # Validate position
             motor_id = follower.motors[joint_name].id
             is_valid, error_msg = validate_position(motor_id, normalized_position)
             if not is_valid:
-                logger.warning(f"Invalid position for {joint_name}: {error_msg}")
+                message_count["invalid"] += 1
+                logger.warning(
+                    f"[MSG #{message_count['total']}] INVALID position for {joint_name} (motor {motor_id}): "
+                    f"{error_msg} (invalid count: {message_count['invalid']})"
+                )
                 return
+            logger.debug(f"[MSG #{message_count['total']}] Position validated OK for {joint_name}")
 
             # Update current state (merge with previous state)
             # Create full action state by taking current state and updating the changed joint
@@ -333,39 +457,60 @@ def _create_joint_state_callback(
 
             # Put action in queue (non-blocking)
             try:
+                queue_size_before = action_queue.qsize()
                 action_queue.put_nowait(action)
+                message_count["queued"] += 1
                 logger.debug(
-                    f"Queued action for {joint_name}: {normalized_position:.2f} "
-                    f"(from {position_radians:.4f} radians)"
+                    f"[MSG #{message_count['total']}] QUEUED action for {joint_name}: "
+                    f"{normalized_position:.2f} (from {position_radians:.4f} rad) "
+                    f"[queue size: {queue_size_before} -> {action_queue.qsize()}, total queued: {message_count['queued']}]"
                 )
             except queue.Full:
                 logger.warning(
-                    f"Action queue full, dropping update for {joint_name}. "
-                    "Consider increasing queue size."
+                    f"[MSG #{message_count['total']}] QUEUE FULL - dropping update for {joint_name}. "
+                    f"Queue size: {action_queue.qsize()}"
                 )
 
         except Exception as e:
-            logger.error(f"Error processing joint state update: {e}", exc_info=True)
+            logger.error(f"[MSG #{message_count['total']}] Error processing joint state update: {e}", exc_info=True)
+
+        # Periodic summary logging
+        if message_count["total"] % 10 == 0:
+            logger.info(
+                f"[CALLBACK STATS] Total: {message_count['total']}, Processed: {message_count['processed']}, "
+                f"Filtered: {message_count['filtered']}, Invalid: {message_count['invalid']}, "
+                f"Queued: {message_count['queued']}, Queue size: {action_queue.qsize()}"
+            )
 
     return callback
 
 
 def remoteoperate(
-    twin_uuid: str,
     client: Cyberwave,
     follower: SO101Follower,
+    robot: Optional[Twin] = None,
+    camera: Optional[Twin] = None,
     fps: int = 30,
+    camera_fps: int = 30,
 ) -> None:
     """
     Run remote operation loop: receive joint states via MQTT and write to follower motors.
 
     Args:
-        twin_uuid: UUID of the twin to subscribe to
         client: Cyberwave client instance
         follower: SO101Follower instance
+        robot: Robot twin instance
+        camera: Camera twin instance
         fps: Target frames per second (not used directly, but kept for compatibility)
+        camera_fps: Frames per second for camera streaming
     """
     setup_logging()
+    time_reference = TimeReference()
+
+    # Get twin_uuid from robot twin
+    if robot is None:
+        raise RuntimeError("Robot twin is required")
+    twin_uuid = robot.uuid
 
     # Ensure follower is connected
     if not follower.connected:
@@ -420,12 +565,13 @@ def remoteoperate(
             time.sleep(0.1)
         logger.info("Connected to Cyberwave MQTT broker")
 
-    # Send initial observation to Cyberwave as individual MQTT messages
+    # Send initial observation to Cyberwave using publish_initial_observation
     try:
         # Get follower's current observation (normalized positions)
         follower_obs = follower.get_observation()
 
-        # Convert to joint index format and send each as individual MQTT message
+        # Convert to joint index format for initial observation
+        observations = {}
         for joint_key, normalized_pos in follower_obs.items():
             # Remove .pos suffix if present
             name = joint_key.removesuffix(".pos")
@@ -441,15 +587,14 @@ def remoteoperate(
                     radians = degrees * math.pi / 180.0
                 else:
                     radians = normalized_pos * math.pi / 180.0  # Assume degrees
-                # Send individual joint state update
-                mqtt_client.update_joint_state(
-                    twin_uuid=twin_uuid,
-                    joint_name=str(joint_index),
-                    position=radians,
-                    velocity=0.0,
-                    effort=0.0,
-                )
+                observations[joint_index] = radians
 
+        # Send initial observation as single update
+        mqtt_client.publish_initial_observation(
+            twin_uuid=twin_uuid,
+            observations=observations,
+        )
+        logger.info(f"Initial observation sent to Cyberwave twin {twin_uuid}, {len(observations)} joints updated")
         logger.info(
             f"Initial observation sent to Cyberwave twin {twin_uuid}, {len(follower_obs)} joints updated"
         )
@@ -471,7 +616,24 @@ def remoteoperate(
     keyboard_thread.start()
     logger.info("Press 'q' to stop remote operation")
 
+    # Start camera streaming thread if follower has cameras configured and camera twin is provided
+    camera_thread = None
+    if follower.config.cameras and len(follower.config.cameras) > 0 and camera is not None:
+        camera_id = follower.config.cameras[0]
+        camera_thread = threading.Thread(
+            target=_camera_worker_thread,
+            args=(client, camera_id, camera_fps, camera.uuid, stop_event, time_reference),
+            daemon=True,
+        )
+        camera_thread.start()
+        logger.info(f"Started camera streaming thread (camera ID: {camera_id}, FPS: {camera_fps})")
+    elif camera is not None:
+        logger.debug("Follower has no cameras configured, skipping camera streaming")
+
     # Create callback for joint state updates
+    logger.info("Creating joint state callback with mappings:")
+    logger.info(f"  joint_index_to_name: {joint_index_to_name}")
+    logger.info(f"  joint_name_to_norm_mode: {joint_name_to_norm_mode}")
     joint_state_callback = _create_joint_state_callback(
         current_state=current_state,
         action_queue=action_queue,
@@ -481,9 +643,12 @@ def remoteoperate(
     )
 
     # Subscribe to joint states
+    # The topic pattern is: {prefix}cyberwave/joint/{twin_uuid}/+
+    # Messages should come on topics like: cyberwave/joint/{twin_uuid}/update
     logger.info(f"Subscribing to joint states for twin {twin_uuid}...")
+    logger.info(f"  Expected topic pattern: cyberwave/joint/{twin_uuid}/+")
     mqtt_client.subscribe_joint_states(twin_uuid, joint_state_callback)
-    logger.info("Subscribed to joint states")
+    logger.info("Subscribed to joint states - waiting for messages...")
 
     # Start motor writer worker thread
     writer_thread = threading.Thread(
@@ -520,6 +685,15 @@ def remoteoperate(
         else:
             logger.info("Motor writer thread stopped successfully")
 
+        # Stop camera streaming thread
+        if camera_thread is not None:
+            logger.info("Stopping camera streaming thread...")
+            camera_thread.join(timeout=5.0)
+            if camera_thread.is_alive():
+                logger.warning("Camera streaming thread did not stop in time")
+            else:
+                logger.info("Camera streaming thread stopped successfully")
+
         logger.info("Remote operation loop ended")
 
 
@@ -528,15 +702,9 @@ def main():
     load_dotenv()
     parser = argparse.ArgumentParser(description="Remote operate SO101 follower via Cyberwave MQTT")
     parser.add_argument(
-        "--token",
-        type=str,
-        required=True,
-        help="Cyberwave API token",
-    )
-    parser.add_argument(
         "--twin-uuid",
         type=str,
-        required=True,
+        required=False,
         help="UUID of the twin to subscribe to",
     )
     parser.add_argument(
@@ -559,10 +727,17 @@ def main():
         help="Device identifier for calibration file (default: 'follower1')",
     )
     parser.add_argument(
-        "--environment-uuid",
+        "--camera-uuid",
         type=str,
         required=False,
-        help="Environment UUID to use for the twin",
+        help="UUID of the twin to stream camera to (default: same as --twin-uuid)",
+    )
+    parser.add_argument(
+        "--camera-fps",
+        type=int,
+        required=False,
+        default=30,
+        help="FPS to use for the camera (default: 30)",
     )
     parser.add_argument(
         "--verbose",
@@ -572,6 +747,10 @@ def main():
 
     args = parser.parse_args()
 
+    # Default camera-uuid to twin-uuid if not provided
+    if args.camera_uuid is None:
+        args.camera_uuid = args.twin_uuid
+
     # Setup logging
     log_level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(
@@ -580,9 +759,11 @@ def main():
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # Initialize Cyberwave client
-    cyberwave_client = Cyberwave(token=args.token)
-    logger.info("Initialized Cyberwave client")
+    # Initialize Cyberwave client and create twins
+    cyberwave_client = Cyberwave()
+    robot = cyberwave_client.twin(asset_key="the-robot-studio/so101", twin_id=args.twin_uuid)
+    camera = cyberwave_client.twin(asset_key="cyberwave/standard-cam", twin_id=args.camera_uuid)
+    logger.info("Connected to Cyberwave MQTT broker and created twins")
 
     # Initialize follower
     from config import FollowerConfig
@@ -591,15 +772,18 @@ def main():
         port=args.follower_port,
         max_relative_target=args.max_relative_target,
         id=args.follower_id,
+        cameras=[0],  # Enable camera support
     )
     follower = SO101Follower(config=follower_config)
     follower.connect()
 
     try:
         remoteoperate(
-            twin_uuid=args.twin_uuid,
             client=cyberwave_client,
             follower=follower,
+            robot=robot,
+            camera=camera,
+            camera_fps=args.camera_fps,
         )
     except Exception as e:
         logger.error(f"Error in remoteoperate: {e}", exc_info=True)
