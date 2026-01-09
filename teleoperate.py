@@ -439,11 +439,11 @@ def _status_logging_thread(
 
         # Script status
         script_status = "🟡 Starting" if not status["script_started"] else "🟢 Running"
-        print(f"Script: {script_status}")
+        print(f"Script:  {script_status}")
 
         # MQTT status
         mqtt_status = "🟢 Connected" if status["mqtt_connected"] else "🔴 Disconnected"
-        print(f"MQTT:   {mqtt_status}")
+        print(f"MQTT:    {mqtt_status}")
 
         # Camera status
         if not status["camera_detected"]:
@@ -452,19 +452,19 @@ def _status_logging_thread(
             camera_status = "🟡 Camera detected (not started)"
         else:
             camera_status = "🟢 Camera streaming"
-        print(f"Camera: {camera_status}")
+        print(f"Camera:  {camera_status}")
 
         # WebRTC status
         webrtc_status = "🟢 Connected" if status["webrtc_connected"] else "🔴 Disconnected"
-        print(f"WebRTC: {webrtc_status}")
+        print(f"WebRTC:  {webrtc_status}")
 
         # Statistics
         print("\nStats:")
-        print(f"  FPS:           {status['fps']}")
-        print(f"  Camera FPS:    {status['camera_fps']}")
-        print(f"  Produced:      {status['messages_produced']}")
-        print(f"  Filtered:      {status['messages_filtered']}")
-        print(f"  Errors:        {status['errors']}")
+        print(f"  FPS:        {status['fps']}")
+        print(f"  Camera FPS: {status['camera_fps']}")
+        print(f"  Produced:   {status['messages_produced']}")
+        print(f"  Filtered:   {status['messages_filtered']}")
+        print(f"  Errors:     {status['errors']}")
 
         # Joint states
         if status["joint_states"]:
@@ -474,7 +474,7 @@ def _status_logging_thread(
             for joint_index in sorted(status["joint_states"].keys()):
                 position = status["joint_states"][joint_index]
                 joint_name = index_to_name.get(joint_index, joint_index)
-                print(f"  {joint_name:16s}: {position:8.3f}")
+                print(f"  {joint_name:12s}: {position:8.3f}")
 
         print("\nPress 'q' to stop")
 
