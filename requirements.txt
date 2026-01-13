@@ -1,5 +1,5 @@
 annotated-types==0.7.0
-cyberwave==0.2.2
+cyberwave==0.2.20
 python-dotenv==1.1.0
 -e git+https://github.com/cyberwave-os/cyberwave-edge-python-so101.git@42c0ac4e182ef69efd5261d46bbda6275a70e43d#egg=cyberwave_so101
 feetech-servo-sdk==1.0.0
