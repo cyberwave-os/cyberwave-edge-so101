@@ -2,25 +2,286 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import math
+import os
 import queue
 import select
 import sys
 import threading
 import time
-from typing import Dict, Optional
+from dataclasses import dataclass, field, asdict
+from typing import Any, Dict, Optional, Union
 
 from dotenv import load_dotenv
 
 from cyberwave import Cyberwave, Twin
 from cyberwave.utils import TimeReference
 
+# Import camera configuration and streamers from cyberwave SDK
+from cyberwave.sensor import (
+    CV2CameraStreamer,
+    CameraConfig,
+    Resolution,
+)
+
+# RealSense is optional - only import if available
+try:
+    from cyberwave.sensor import (
+        RealSenseStreamer,
+        RealSenseConfig,
+        RealSenseDiscovery,
+    )
+    _has_realsense = True
+except ImportError:
+    _has_realsense = False
+    RealSenseStreamer = None
+    RealSenseConfig = None
+    RealSenseDiscovery = None
+
 from follower import SO101Follower
 from leader import SO101Leader
 from motors import MotorNormMode
 
 logger = logging.getLogger(__name__)
+
+# Default camera config file path
+DEFAULT_CAMERA_CONFIG_PATH = "camera_config.json"
+
+
+@dataclass
+class TeleoperateCameraConfig:
+    """Camera configuration for teleoperation.
+
+    This configuration can be saved to and loaded from a JSON file,
+    making it easy to share camera settings across different setups.
+
+    Attributes:
+        camera_type: Camera type - "cv2" for USB/webcam/IP, "realsense" for Intel RealSense
+        camera_id: Camera device ID (int) or stream URL (str) for CV2 cameras
+        fps: Frames per second for camera streaming
+        resolution: Video resolution as [width, height] list
+        enable_depth: Enable depth streaming for RealSense cameras
+        depth_fps: Depth stream FPS for RealSense cameras
+        depth_resolution: Depth resolution as [width, height] list (optional)
+        depth_publish_interval: Publish depth every N frames for RealSense
+        serial_number: RealSense device serial number (optional)
+
+    Example JSON file (camera_config.json):
+        {
+            "camera_type": "cv2",
+            "camera_id": 0,
+            "fps": 30,
+            "resolution": [640, 480]
+        }
+
+    Example for RealSense:
+        {
+            "camera_type": "realsense",
+            "fps": 30,
+            "resolution": [1280, 720],
+            "enable_depth": true,
+            "depth_fps": 15,
+            "depth_resolution": [640, 480],
+            "depth_publish_interval": 30
+        }
+
+    Example for IP camera:
+        {
+            "camera_type": "cv2",
+            "camera_id": "rtsp://192.168.1.100:554/stream",
+            "fps": 15,
+            "resolution": [640, 480]
+        }
+    """
+
+    camera_type: str = "cv2"
+    camera_id: Union[int, str] = 0
+    fps: int = 30
+    resolution: list = field(default_factory=lambda: [640, 480])
+    enable_depth: bool = False
+    depth_fps: int = 30
+    depth_resolution: Optional[list] = None
+    depth_publish_interval: int = 30
+    serial_number: Optional[str] = None
+
+    def get_resolution(self) -> Resolution:
+        """Get resolution as Resolution enum."""
+        width, height = self.resolution
+        match = Resolution.from_size(width, height)
+        if match:
+            return match
+        return Resolution.closest(width, height)
+
+    def get_depth_resolution(self) -> Optional[Resolution]:
+        """Get depth resolution as Resolution enum."""
+        if self.depth_resolution is None:
+            return None
+        width, height = self.depth_resolution
+        match = Resolution.from_size(width, height)
+        if match:
+            return match
+        return Resolution.closest(width, height)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return asdict(self)
+
+    def save(self, path: str = DEFAULT_CAMERA_CONFIG_PATH) -> None:
+        """Save configuration to JSON file.
+
+        Args:
+            path: Path to save the configuration file
+        """
+        with open(path, "w") as f:
+            json.dump(self.to_dict(), f, indent=2)
+        logger.info(f"Camera configuration saved to {path}")
+
+    @classmethod
+    def load(cls, path: str = DEFAULT_CAMERA_CONFIG_PATH) -> "TeleoperateCameraConfig":
+        """Load configuration from JSON file.
+
+        Args:
+            path: Path to the configuration file
+
+        Returns:
+            TeleoperateCameraConfig instance
+
+        Raises:
+            FileNotFoundError: If the configuration file doesn't exist
+            json.JSONDecodeError: If the file is not valid JSON
+        """
+        with open(path, "r") as f:
+            data = json.load(f)
+
+        # Handle resolution conversion
+        if "resolution" in data and isinstance(data["resolution"], str):
+            # Parse "WIDTHxHEIGHT" format
+            width, height = map(int, data["resolution"].lower().split("x"))
+            data["resolution"] = [width, height]
+
+        if "depth_resolution" in data and isinstance(data["depth_resolution"], str):
+            width, height = map(int, data["depth_resolution"].lower().split("x"))
+            data["depth_resolution"] = [width, height]
+
+        logger.info(f"Camera configuration loaded from {path}")
+        return cls(**data)
+
+    @classmethod
+    def from_realsense_device(
+        cls,
+        prefer_resolution: Resolution = Resolution.VGA,
+        prefer_fps: int = 30,
+        enable_depth: bool = True,
+        serial_number: Optional[str] = None,
+    ) -> "TeleoperateCameraConfig":
+        """Create configuration from connected RealSense device.
+
+        Auto-detects device capabilities and creates optimal configuration.
+
+        Args:
+            prefer_resolution: Preferred resolution (will find closest match)
+            prefer_fps: Preferred FPS (will find closest match)
+            enable_depth: Whether to enable depth streaming
+            serial_number: Target device serial number (None = first device)
+
+        Returns:
+            TeleoperateCameraConfig configured for the device
+        """
+        if not _has_realsense:
+            raise ImportError(
+                "RealSense support requires pyrealsense2. "
+                "Install with: pip install pyrealsense2"
+            )
+
+        # Use SDK's RealSenseConfig.from_device() for auto-detection
+        rs_config = RealSenseConfig.from_device(
+            serial_number=serial_number,
+            prefer_resolution=prefer_resolution,
+            prefer_fps=prefer_fps,
+            enable_depth=enable_depth,
+        )
+
+        return cls(
+            camera_type="realsense",
+            fps=rs_config.color_fps,
+            resolution=[rs_config.color_width, rs_config.color_height],
+            enable_depth=rs_config.enable_depth,
+            depth_fps=rs_config.depth_fps,
+            depth_resolution=[rs_config.depth_width, rs_config.depth_height],
+            depth_publish_interval=rs_config.depth_publish_interval,
+            serial_number=rs_config.serial_number,
+        )
+
+    @classmethod
+    def create_default_cv2(
+        cls,
+        camera_id: Union[int, str] = 0,
+        fps: int = 30,
+        resolution: Resolution = Resolution.VGA,
+    ) -> "TeleoperateCameraConfig":
+        """Create default CV2 camera configuration.
+
+        Args:
+            camera_id: Camera device ID or stream URL
+            fps: Frames per second
+            resolution: Video resolution
+
+        Returns:
+            TeleoperateCameraConfig for CV2 camera
+        """
+        return cls(
+            camera_type="cv2",
+            camera_id=camera_id,
+            fps=fps,
+            resolution=[resolution.width, resolution.height],
+        )
+
+    def __str__(self) -> str:
+        res_str = f"{self.resolution[0]}x{self.resolution[1]}"
+        if self.camera_type == "realsense" and self.enable_depth:
+            depth_res = self.depth_resolution or self.resolution
+            return (
+                f"TeleoperateCameraConfig(type={self.camera_type}, "
+                f"color={res_str}@{self.fps}fps, "
+                f"depth={depth_res[0]}x{depth_res[1]}@{self.depth_fps}fps)"
+            )
+        return f"TeleoperateCameraConfig(type={self.camera_type}, id={self.camera_id}, {res_str}@{self.fps}fps)"
+
+
+def generate_camera_config(
+    output_path: str = DEFAULT_CAMERA_CONFIG_PATH,
+    camera_type: str = "cv2",
+    auto_detect: bool = False,
+) -> TeleoperateCameraConfig:
+    """Generate a camera configuration file.
+
+    Args:
+        output_path: Path to save the configuration file
+        camera_type: Camera type ("cv2" or "realsense")
+        auto_detect: Auto-detect RealSense device capabilities
+
+    Returns:
+        Generated TeleoperateCameraConfig
+    """
+    if camera_type == "realsense" and auto_detect:
+        config = TeleoperateCameraConfig.from_realsense_device()
+    elif camera_type == "realsense":
+        config = TeleoperateCameraConfig(
+            camera_type="realsense",
+            fps=30,
+            resolution=[640, 480],
+            enable_depth=True,
+            depth_fps=30,
+            depth_resolution=[640, 480],
+            depth_publish_interval=30,
+        )
+    else:
+        config = TeleoperateCameraConfig.create_default_cv2()
+
+    config.save(output_path)
+    return config
 
 
 class StatusTracker:
@@ -121,30 +382,41 @@ class StatusTracker:
 
 def _camera_worker_thread(
     client: Cyberwave,
-    camera_id: int,
+    camera_id: Union[int, str],
     fps: int,
     twin_uuid: str,
     stop_event: threading.Event,
     time_reference: TimeReference,
     status_tracker: Optional[StatusTracker] = None,
-    camera_type: str = "rgb",
+    camera_type: str = "cv2",
+    resolution: Resolution = Resolution.VGA,
+    enable_depth: bool = False,
+    depth_fps: int = 30,
+    depth_resolution: Optional[Resolution] = None,
+    depth_publish_interval: int = 30,
 ) -> None:
     """
     Worker thread that handles camera streaming.
 
     Runs an async event loop in a separate thread to handle camera streaming.
+    Supports both CV2 (USB/webcam/IP) cameras and Intel RealSense cameras.
     Uses CameraStreamer.run_with_auto_reconnect() for automatic command handling
     and reconnection.
 
     Args:
         client: Cyberwave client instance
-        camera_id: Camera index to stream
+        camera_id: Camera index (int) or URL (str) to stream
         fps: Frames per second for camera stream
         twin_uuid: UUID of the twin to stream to
         stop_event: Event to signal thread to stop
         time_reference: TimeReference instance
         status_tracker: Optional status tracker for camera status updates
-        camera_type: Camera sensor type ("rgb" or "depth", default: "rgb")
+        camera_type: Camera type - "cv2" for USB/webcam/IP, "realsense" for Intel RealSense
+        resolution: Video resolution (default: VGA 640x480)
+        enable_depth: Enable depth streaming for RealSense (default: False)
+        depth_fps: Depth stream FPS for RealSense (default: 30)
+        depth_resolution: Depth resolution for RealSense (default: same as color)
+        depth_publish_interval: Publish depth every N frames for RealSense (default: 30)
     Returns:
         None
     """
@@ -156,14 +428,57 @@ def _camera_worker_thread(
         # Create async stop event from threading.Event
         async_stop_event = asyncio.Event()
 
-        # Create camera streamer using the SDK API
-        streamer = client.video_stream(
-            twin_uuid=twin_uuid,
-            camera_id=camera_id,
-            fps=fps,
-            time_reference=time_reference,
-            sensor_type=camera_type,
-        )
+        # Ensure MQTT is connected
+        if not client.mqtt.connected:
+            client.mqtt.connect()
+
+        # Create camera streamer based on camera type
+        streamer = None
+        camera_type_lower = camera_type.lower()
+
+        if camera_type_lower == "cv2":
+            # Create CV2 camera config
+            camera_config = CameraConfig(
+                resolution=resolution,
+                fps=fps,
+                camera_id=camera_id if isinstance(camera_id, int) else 0,
+            )
+
+            # Create CV2 camera streamer
+            streamer = CV2CameraStreamer(
+                client=client.mqtt,
+                camera_id=camera_id,
+                fps=fps,
+                resolution=resolution,
+                twin_uuid=twin_uuid,
+                time_reference=time_reference,
+                auto_reconnect=True,
+            )
+        elif camera_type_lower == "realsense":
+            if not _has_realsense:
+                raise ImportError(
+                    "RealSense camera support requires pyrealsense2. "
+                    "Install with: pip install pyrealsense2"
+                )
+
+            # Use depth_resolution if provided, otherwise use color resolution
+            actual_depth_resolution = depth_resolution if depth_resolution else resolution
+
+            # Create RealSense streamer
+            streamer = RealSenseStreamer(
+                client=client.mqtt,
+                color_fps=fps,
+                depth_fps=depth_fps,
+                color_resolution=resolution,
+                depth_resolution=actual_depth_resolution,
+                enable_depth=enable_depth,
+                depth_publish_interval=depth_publish_interval,
+                twin_uuid=twin_uuid,
+                time_reference=time_reference,
+                auto_reconnect=True,
+            )
+        else:
+            raise ValueError(f"Unsupported camera type: {camera_type}. Use 'cv2' or 'realsense'.")
 
         # Monitor the threading stop_event and set async_stop_event
         async def monitor_stop():
@@ -593,64 +908,6 @@ def _status_logging_thread(
         sys.stdout.flush()
 
 
-def _log_leader_follower_states(
-    leader_observation: Dict[str, float],
-    follower_observation: Optional[Dict[str, float]],
-    leader: SO101Leader,
-    follower: Optional[SO101Follower] = None,
-) -> None:
-    """
-    Log leader and follower states in a readable format matching read_device.py style.
-
-    Args:
-        leader_observation: Leader observation (normalized positions)
-        follower_observation: Optional follower observation (normalized or raw positions)
-        leader: Leader instance to get raw values if needed
-        follower: Optional follower instance to check calibration status
-    """
-    lines = []
-    lines.append("Leader/Follower States\n")
-
-    if follower_observation is not None:
-        follower_calibrated = follower.is_calibrated if follower is not None else False
-
-        if follower_calibrated:
-            lines.append("Comparison (normalized values):")
-            for name in sorted(leader_observation.keys()):
-                leader_val = leader_observation.get(name, 0.0)
-                follower_val = follower_observation.get(name, 0.0)
-                diff = abs(leader_val - follower_val)
-                diff_marker = "⚠️" if diff > 5.0 else "  "
-                lines.append(
-                    f"  {diff_marker} {name:16s} | Leader: {int(leader_val):4d} | Follower: {int(follower_val):4d} | Diff: {int(diff):4d}\n"
-                )
-        else:
-            lines.append("Comparison (raw values) - Follower NOT calibrated:")
-            # When follower is not calibrated, get raw positions from bus
-            motor_ids = [motor.id for motor in leader.motors.values()]
-            leader_raw_positions = leader.bus.sync_read_positions(motor_ids)
-            for name in sorted(leader_observation.keys()):
-                # Get raw position for this motor
-                motor_id = leader.motors[name].id
-                leader_raw = leader_raw_positions.get(motor_id, 0.0)
-                # Follower observation is raw when not calibrated
-                follower_raw = follower_observation.get(name, 0.0)
-                diff = abs(leader_raw - follower_raw)
-                diff_marker = "⚠️" if diff > 100.0 else "  "
-                lines.append(
-                    f"  {diff_marker} {name:16s} | Leader: {int(leader_raw):4d} | Follower: {int(follower_raw):4d} | Diff: {int(diff):4d}\n"
-                )
-            lines.append("  Note: Calibrate the follower to get normalized values for comparison\n")
-    else:
-        lines.append("Leader States (normalized):")
-        for name in sorted(leader_observation.keys()):
-            leader_val = leader_observation.get(name, 0.0)
-            lines.append(f"  {name:16s} | Position: {int(leader_val):4d}")
-    lines.append("\n")
-    # Logging disabled for clean status display
-    pass
-
-
 def _keyboard_input_thread(stop_event: threading.Event) -> None:
     """
     Thread to monitor keyboard input for 'q' key to stop the loop gracefully.
@@ -790,7 +1047,13 @@ def teleoperate(
     effort_threshold: float = 0.1,
     robot: Optional[Twin] = None,
     camera: Optional[Twin] = None,
-    camera_type: str = "rgb",
+    camera_type: str = "cv2",
+    camera_id: Union[int, str] = 0,
+    camera_resolution: Resolution = Resolution.VGA,
+    enable_depth: bool = False,
+    depth_fps: int = 30,
+    depth_resolution: Optional[Resolution] = None,
+    depth_publish_interval: int = 30,
 ) -> None:
     """
     Run teleoperation loop: read from leader, send to follower, and send follower data to Cyberwave.
@@ -799,6 +1062,8 @@ def teleoperate(
     keeping the main loop responsive. Only sends updates when values change.
     Follower data (actual robot state) is sent to Cyberwave, not leader data.
     Always converts positions to radians.
+
+    Supports both CV2 (USB/webcam/IP) cameras and Intel RealSense cameras.
 
     Args:
         leader: SO101Leader instance (optional if camera_only=True)
@@ -811,7 +1076,13 @@ def teleoperate(
         effort_threshold: Minimum change in effort to trigger an update
         robot: Robot twin instance
         camera: Camera twin instance
-        camera_type: Camera sensor type ("rgb" or "depth", default: "rgb")
+        camera_type: Camera type - "cv2" for USB/webcam/IP, "realsense" for Intel RealSense
+        camera_id: Camera device ID (int) or stream URL (str) for CV2 cameras (default: 0)
+        camera_resolution: Video resolution (default: VGA 640x480)
+        enable_depth: Enable depth streaming for RealSense (default: False)
+        depth_fps: Depth stream FPS for RealSense (default: 30)
+        depth_resolution: Depth resolution for RealSense (default: same as color)
+        depth_publish_interval: Publish depth every N frames for RealSense (default: 30)
     """
     time_reference = TimeReference()
 
@@ -939,28 +1210,36 @@ def teleoperate(
         )
         worker_thread.start()
 
-    # Start camera streaming thread if follower has cameras configured
+    # Start camera streaming thread if follower has cameras configured or camera twin is provided
     camera_thread = None
-    if follower is not None and cyberwave_client is not None:
-        if follower.config.cameras and len(follower.config.cameras) > 0:
-            camera_id = follower.config.cameras[0]
-            camera_thread = threading.Thread(
-                target=_camera_worker_thread,
-                args=(
-                    cyberwave_client,
-                    camera_id,
-                    camera_fps,
-                    camera.uuid,
-                    stop_event,
-                    time_reference,
-                    status_tracker,
-                    camera_type,
-                ),
-                daemon=True,
-            )
-            camera_thread.start()
-        else:
-            status_tracker.update_camera_status(detected=False, started=False)
+    if camera is not None and cyberwave_client is not None:
+        # Determine camera_id from follower config or use provided camera_id
+        actual_camera_id = camera_id
+        if follower is not None and follower.config.cameras and len(follower.config.cameras) > 0:
+            actual_camera_id = follower.config.cameras[0]
+
+        camera_thread = threading.Thread(
+            target=_camera_worker_thread,
+            args=(
+                cyberwave_client,
+                actual_camera_id,
+                camera_fps,
+                camera.uuid,
+                stop_event,
+                time_reference,
+                status_tracker,
+                camera_type,
+                camera_resolution,
+                enable_depth,
+                depth_fps,
+                depth_resolution,
+                depth_publish_interval,
+            ),
+            daemon=True,
+        )
+        camera_thread.start()
+    else:
+        status_tracker.update_camera_status(detected=False, started=False)
 
     # TimeReference synchronization: The teleop loop updates TimeReference, and the camera reads from it.
     # This ensures that when an action is performed, the camera frame is synchronized with that action.
@@ -1051,6 +1330,51 @@ def teleoperate(
             status_thread.join(timeout=1.0)
 
 
+def _parse_resolution(resolution_str: str) -> Resolution:
+    """Parse resolution string to Resolution enum.
+
+    Args:
+        resolution_str: Resolution string like "VGA", "HD", "FULL_HD", or "WIDTHxHEIGHT"
+
+    Returns:
+        Resolution enum value
+    """
+    resolution_str = resolution_str.upper().strip()
+
+    # Try to match enum name
+    resolution_map = {
+        "QVGA": Resolution.QVGA,
+        "VGA": Resolution.VGA,
+        "SVGA": Resolution.SVGA,
+        "HD": Resolution.HD,
+        "720P": Resolution.HD,
+        "FULL_HD": Resolution.FULL_HD,
+        "1080P": Resolution.FULL_HD,
+    }
+
+    if resolution_str in resolution_map:
+        return resolution_map[resolution_str]
+
+    # Try to parse WIDTHxHEIGHT format
+    if "x" in resolution_str.lower():
+        try:
+            width, height = resolution_str.lower().split("x")
+            width, height = int(width), int(height)
+            # Try to find matching resolution enum
+            match = Resolution.from_size(width, height)
+            if match:
+                return match
+            # Return closest resolution
+            return Resolution.closest(width, height)
+        except ValueError:
+            pass
+
+    raise ValueError(
+        f"Invalid resolution: {resolution_str}. "
+        "Use QVGA, VGA, SVGA, HD, FULL_HD, or WIDTHxHEIGHT format."
+    )
+
+
 def main():
     """Main entry point for teleoperation script."""
     # Load environment variables from .env file
@@ -1111,18 +1435,189 @@ def main():
     parser.add_argument(
         "--camera-type",
         type=str,
-        choices=["rgb", "depth"],
-        default="rgb",
-        help="Camera sensor type: 'rgb' or 'depth' (default: 'rgb')",
+        choices=["cv2", "realsense"],
+        default="cv2",
+        help="Camera type: 'cv2' for USB/webcam/IP cameras, 'realsense' for Intel RealSense (default: 'cv2')",
+    )
+    parser.add_argument(
+        "--camera-id",
+        type=str,
+        default="0",
+        help="Camera device ID (integer) or stream URL (string) for CV2 cameras. "
+        "Examples: '0' for first USB camera, 'rtsp://192.168.1.100:554/stream' for RTSP (default: '0')",
+    )
+    parser.add_argument(
+        "--camera-resolution",
+        type=str,
+        default="VGA",
+        help="Camera resolution: QVGA (320x240), VGA (640x480), SVGA (800x600), HD (1280x720), "
+        "FULL_HD (1920x1080), or WIDTHxHEIGHT format (default: VGA)",
+    )
+    parser.add_argument(
+        "--enable-depth",
+        action="store_true",
+        help="Enable depth streaming for RealSense cameras",
+    )
+    parser.add_argument(
+        "--depth-fps",
+        type=int,
+        default=30,
+        help="Depth stream FPS for RealSense cameras (default: 30)",
+    )
+    parser.add_argument(
+        "--depth-resolution",
+        type=str,
+        default=None,
+        help="Depth stream resolution for RealSense cameras (default: same as --camera-resolution)",
+    )
+    parser.add_argument(
+        "--depth-publish-interval",
+        type=int,
+        default=30,
+        help="Publish depth frame every N frames for RealSense cameras (default: 30)",
+    )
+    parser.add_argument(
+        "--list-realsense",
+        action="store_true",
+        help="List available RealSense devices and exit",
+    )
+    parser.add_argument(
+        "--camera-config",
+        type=str,
+        default=None,
+        help=f"Path to camera configuration JSON file. If provided, camera settings from the file "
+        f"will be used instead of CLI arguments. Generate with --generate-camera-config.",
+    )
+    parser.add_argument(
+        "--generate-camera-config",
+        type=str,
+        nargs="?",
+        const=DEFAULT_CAMERA_CONFIG_PATH,
+        metavar="PATH",
+        help=f"Generate a camera configuration file and exit. "
+        f"Optionally specify output path (default: {DEFAULT_CAMERA_CONFIG_PATH}). "
+        f"Use with --camera-type to specify camera type, --auto-detect for RealSense auto-detection.",
+    )
+    parser.add_argument(
+        "--auto-detect",
+        action="store_true",
+        help="Auto-detect RealSense device capabilities when generating config (use with --generate-camera-config)",
     )
 
     args = parser.parse_args()
+
+    # Handle --generate-camera-config
+    if args.generate_camera_config:
+        output_path = args.generate_camera_config
+        print(f"Generating camera configuration file: {output_path}")
+
+        try:
+            config = generate_camera_config(
+                output_path=output_path,
+                camera_type=args.camera_type,
+                auto_detect=args.auto_detect,
+            )
+            print(f"Configuration saved to: {output_path}")
+            print(f"Config: {config}")
+            print("\nYou can now use this config with:")
+            print(f"  python teleoperate.py --camera-config {output_path} ...")
+        except Exception as e:
+            print(f"Error generating config: {e}")
+            sys.exit(1)
+        sys.exit(0)
+
+    # Handle --list-realsense
+    if args.list_realsense:
+        if not _has_realsense:
+            print("RealSense support not available. Install with: pip install pyrealsense2")
+            sys.exit(1)
+
+        print("Discovering RealSense devices...")
+        devices = RealSenseDiscovery.list_devices()
+        if not devices:
+            print("No RealSense devices found.")
+        else:
+            print(f"Found {len(devices)} RealSense device(s):\n")
+            for i, dev in enumerate(devices):
+                print(f"Device {i}:")
+                print(f"  Name: {dev.name}")
+                print(f"  Serial: {dev.serial_number}")
+                print(f"  Firmware: {dev.firmware_version}")
+                print(f"  USB Type: {dev.usb_type}")
+                print(f"  Sensors: {', '.join(dev.sensors)}")
+
+                # Get detailed info for color resolutions
+                detailed = RealSenseDiscovery.get_device_info(dev.serial_number)
+                if detailed:
+                    color_res = detailed.get_color_resolutions()
+                    depth_res = detailed.get_depth_resolutions()
+                    print(f"  Color Resolutions: {color_res}")
+                    print(f"  Depth Resolutions: {depth_res}")
+                print()
+        sys.exit(0)
+
     if args.camera_uuid is None:
         args.camera_uuid = args.twin_uuid
+
+    # Load camera configuration from file or CLI arguments
+    camera_config: Optional[TeleoperateCameraConfig] = None
+
+    if args.camera_config:
+        # Load from JSON file
+        if not os.path.exists(args.camera_config):
+            print(f"Error: Camera config file not found: {args.camera_config}")
+            print(f"Generate one with: python teleoperate.py --generate-camera-config {args.camera_config}")
+            sys.exit(1)
+
+        try:
+            camera_config = TeleoperateCameraConfig.load(args.camera_config)
+            print(f"Loaded camera config from: {args.camera_config}")
+            print(f"Config: {camera_config}")
+        except Exception as e:
+            print(f"Error loading camera config: {e}")
+            sys.exit(1)
+
+        # Use values from config file
+        camera_type = camera_config.camera_type
+        camera_id = camera_config.camera_id
+        camera_fps = camera_config.fps
+        camera_resolution = camera_config.get_resolution()
+        enable_depth = camera_config.enable_depth
+        depth_fps = camera_config.depth_fps
+        depth_resolution = camera_config.get_depth_resolution()
+        depth_publish_interval = camera_config.depth_publish_interval
+    else:
+        # Use CLI arguments
+        camera_type = args.camera_type
+        camera_fps = args.camera_fps
+        enable_depth = args.enable_depth
+        depth_fps = args.depth_fps
+        depth_publish_interval = args.depth_publish_interval
+
+        # Parse camera_id (convert to int if it's a number)
+        camera_id: Union[int, str] = args.camera_id
+        try:
+            camera_id = int(args.camera_id)
+        except ValueError:
+            camera_id = args.camera_id  # Keep as string (URL)
+
+        # Parse resolutions
+        camera_resolution = _parse_resolution(args.camera_resolution)
+        depth_resolution = None
+        if args.depth_resolution:
+            depth_resolution = _parse_resolution(args.depth_resolution)
+
     # Initialize Cyberwave client and get MQTT client
     cyberwave_client = Cyberwave()
+
+    # Determine camera asset based on camera type
+    if camera_type == "realsense":
+        camera_asset = "intel/realsensed455"  # or appropriate RealSense asset
+    else:
+        camera_asset = "cyberwave/standard-cam"
+
     robot = cyberwave_client.twin(asset_key="the-robot-studio/so101", twin_id=args.twin_uuid, name="robot")
-    camera = cyberwave_client.twin(asset_key="cyberwave/standard-cam", twin_id=args.camera_uuid, name="camera")
+    camera = cyberwave_client.twin(asset_key=camera_asset, twin_id=args.camera_uuid, name="camera")
     mqtt_client = cyberwave_client.mqtt
 
     # Initialize leader (optional if camera-only mode)
@@ -1147,7 +1642,7 @@ def main():
         from config import FollowerConfig
 
         follower_config = FollowerConfig(
-            port=args.follower_port, max_relative_target=args.max_relative_target, cameras=[0]
+            port=args.follower_port, max_relative_target=args.max_relative_target, cameras=[camera_id] if isinstance(camera_id, int) else [0]
         )
         follower = SO101Follower(config=follower_config)
         follower.connect()
@@ -1158,10 +1653,16 @@ def main():
             cyberwave_client=cyberwave_client,
             follower=follower,
             fps=args.fps,
-            camera_fps=args.camera_fps,
+            camera_fps=camera_fps,
             robot=robot,
             camera=camera,
-            camera_type=args.camera_type,
+            camera_type=camera_type,
+            camera_id=camera_id,
+            camera_resolution=camera_resolution,
+            enable_depth=enable_depth,
+            depth_fps=depth_fps,
+            depth_resolution=depth_resolution,
+            depth_publish_interval=depth_publish_interval,
         )
     finally:
         if leader is not None:
@@ -1171,3 +1672,7 @@ def main():
         # Disconnect MQTT client
         if mqtt_client is not None and mqtt_client.connected:
             mqtt_client.disconnect()
+
+
+if __name__ == "__main__":
+    main()
