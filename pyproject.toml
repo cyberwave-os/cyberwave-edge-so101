@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cyberwave-so101"
-version = "0.1.0"
+version = "0.2.0"
 description = "Standalone SO101 Robot Library for operating SO101 leader and follower robots using scservo_sdk (feetech)"
 readme = "README.md"
 requires-python = ">=3.8"
