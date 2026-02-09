@@ -180,7 +180,12 @@ so101-calibrate --type leader --port /dev/tty.usbmodem123 --id leader1 --voltage
 
 **Calibration Process:**
 
-1. Move the device to the middle of its range of motion
+1. Move the device to the zero pose (starting position) as shown in the image below:
+   
+   ![SO101 Zero Pose](so101-zero-pose.png)
+   
+   This is the recommended starting position for calibration, with all joints in a well-defined configuration.
+
 2. Press ENTER to set homing offsets
 3. Move all joints through their full ranges of motion
 4. Press ENTER to stop recording

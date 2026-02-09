@@ -31,6 +31,7 @@ try:
         RealSenseConfig,
         RealSenseDiscovery,
     )
+
     _has_realsense = True
 except ImportError:
     _has_realsense = False
@@ -135,8 +136,7 @@ class RemoteoperateCameraConfig:
         """Create configuration from connected RealSense device."""
         if not _has_realsense:
             raise ImportError(
-                "RealSense support requires pyrealsense2. "
-                "Install with: pip install pyrealsense2"
+                "RealSense support requires pyrealsense2. Install with: pip install pyrealsense2"
             )
 
         rs_config = RealSenseConfig.from_device(
@@ -182,6 +182,46 @@ class RemoteoperateCameraConfig:
                 f"depth={depth_res[0]}x{depth_res[1]}@{self.depth_fps}fps)"
             )
         return f"RemoteoperateCameraConfig(type={self.camera_type}, id={self.camera_id}, {res_str}@{self.fps}fps)"
+
+
+def _detect_camera_type_from_asset(asset_key: str) -> str:
+    """
+    Detect camera type from asset key.
+
+    Args:
+        asset_key: Asset key (e.g., "intel/realsensed455", "cyberwave/standard-cam")
+
+    Returns:
+        Camera type: "realsense" or "cv2"
+    """
+    asset_lower = asset_key.lower()
+    if "realsense" in asset_lower or "intel" in asset_lower:
+        return "realsense"
+    return "cv2"
+
+
+def _get_default_camera_config(camera_type: str) -> RemoteoperateCameraConfig:
+    """
+    Get default camera configuration based on camera type.
+
+    Args:
+        camera_type: Camera type ("cv2" or "realsense")
+
+    Returns:
+        RemoteoperateCameraConfig with default settings
+    """
+    if camera_type == "realsense":
+        return RemoteoperateCameraConfig(
+            camera_type="realsense",
+            fps=30,
+            resolution=[640, 480],
+            enable_depth=True,
+            depth_fps=15,
+            depth_resolution=[640, 480],
+            depth_publish_interval=30,
+        )
+    else:
+        return RemoteoperateCameraConfig.create_default_cv2()
 
 
 class StatusTracker:
@@ -334,7 +374,11 @@ def _status_logging_thread(
             else:
                 webrtc_icon = "🔴"
 
-            lines.append(f"Script:{script_icon} MQTT:{mqtt_icon} Camera:{camera_icon} WebRTC:{webrtc_icon}".ljust(70))
+            lines.append(
+                f"Script:{script_icon} MQTT:{mqtt_icon} Camera:{camera_icon} WebRTC:{webrtc_icon}".ljust(
+                    70
+                )
+            )
             lines.append("-" * 70)
 
             # Statistics
@@ -910,9 +954,9 @@ def remoteoperate(
 
     # Set twin info for status display
     robot_uuid = robot.uuid if robot else ""
-    robot_name = robot.name if robot and hasattr(robot, 'name') else "so101-remote"
+    robot_name = robot.name if robot and hasattr(robot, "name") else "so101-remote"
     camera_uuid_val = camera.uuid if camera else ""
-    camera_name = camera.name if camera and hasattr(camera, 'name') else "camera-remote"
+    camera_name = camera.name if camera and hasattr(camera, "name") else "camera-remote"
     status_tracker.set_twin_info(robot_uuid, robot_name, camera_uuid_val, camera_name)
 
     # Get twin_uuid from robot twin
@@ -1270,11 +1314,15 @@ def main():
     if args.camera_uuid is None:
         args.camera_uuid = args.twin_uuid
 
-    # Load camera configuration from file or CLI arguments
+    # Initialize Cyberwave client early to check for camera settings
+    cyberwave_client = Cyberwave()
+
+    # Load camera configuration: priority order is config file > auto-detect from asset > CLI args
     camera_config: Optional[RemoteoperateCameraConfig] = None
+    camera_twin = None
 
     if args.camera_config:
-        # Load from JSON file
+        # Load from JSON file (highest priority)
         if not os.path.exists(args.camera_config):
             print(f"Error: Camera config file not found: {args.camera_config}")
             sys.exit(1)
@@ -1296,8 +1344,67 @@ def main():
         depth_fps = camera_config.depth_fps
         depth_resolution = camera_config.get_depth_resolution()
         depth_publish_interval = camera_config.depth_publish_interval
+
+        # Determine camera asset from config
+        if camera_type == "realsense":
+            camera_asset = "intel/realsensed455"
+        else:
+            camera_asset = "cyberwave/standard-cam"
+    elif args.camera_uuid:
+        # If camera-uuid is provided, auto-detect camera type from asset
+        # Try to detect camera type by fetching the twin with different asset keys
+        camera_asset = None
+
+        # Try RealSense asset first
+        try:
+            camera_twin = cyberwave_client.twin(
+                asset_key="intel/realsensed455", twin_id=args.camera_uuid, name="camera"
+            )
+            camera_asset = "intel/realsensed455"
+        except Exception:
+            # Try standard-cam asset
+            try:
+                camera_twin = cyberwave_client.twin(
+                    asset_key="cyberwave/standard-cam", twin_id=args.camera_uuid, name="camera"
+                )
+                camera_asset = "cyberwave/standard-cam"
+            except Exception as e:
+                logger.debug(f"Could not fetch camera twin: {e}")
+                # Fall back to detecting from args.camera_type if available
+                if hasattr(args, "camera_type") and args.camera_type:
+                    if args.camera_type == "realsense":
+                        camera_asset = "intel/realsensed455"
+                    else:
+                        camera_asset = "cyberwave/standard-cam"
+                else:
+                    # Default to standard-cam if we can't determine
+                    camera_asset = "cyberwave/standard-cam"
+                # Create twin with detected/default asset
+                camera_twin = cyberwave_client.twin(
+                    asset_key=camera_asset, twin_id=args.camera_uuid, name="camera"
+                )
+
+        # Auto-detect camera type from asset and use defaults
+        if camera_asset is None:
+            camera_asset = "cyberwave/standard-cam"
+
+        detected_type = _detect_camera_type_from_asset(camera_asset)
+        camera_config = _get_default_camera_config(detected_type)
+
+        camera_type = camera_config.camera_type
+        camera_id = camera_config.camera_id
+        camera_fps = camera_config.fps
+        camera_resolution = camera_config.get_resolution()
+        enable_depth = camera_config.enable_depth
+        depth_fps = camera_config.depth_fps
+        depth_resolution = camera_config.get_depth_resolution()
+        depth_publish_interval = camera_config.depth_publish_interval
+
+        logger.info(
+            f"Auto-detected camera type '{detected_type}' from asset '{camera_asset}', using default settings"
+        )
     else:
-        # Use CLI arguments
+        # Use CLI arguments or defaults
         camera_type = args.camera_type
         camera_fps = args.camera_fps
         enable_depth = args.enable_depth
@@ -1317,17 +1424,16 @@ def main():
         if args.depth_resolution:
             depth_resolution = _parse_resolution(args.depth_resolution)
 
-    # Initialize Cyberwave client and create twins
-    cyberwave_client = Cyberwave()
+        # Determine camera asset based on camera_type
+        if camera_type == "realsense":
+            camera_asset = "intel/realsensed455"
+        else:
+            camera_asset = "cyberwave/standard-cam"
 
-    # Determine camera asset based on camera type
-    if camera_type == "realsense":
-        camera_asset = "intel/realsensed455"
-    else:
-        camera_asset = "cyberwave/standard-cam"
-
-    robot = cyberwave_client.twin(asset_key="the-robot-studio/so101", twin_id=args.twin_uuid, name="robot")
-    camera = cyberwave_client.twin(asset_key=camera_asset, twin_id=args.camera_uuid, name="camera")
+    robot = cyberwave_client.twin(
+        asset_key="the-robot-studio/so101", twin_id=args.twin_uuid, name="robot"
+    )
+    camera = camera_twin
 
     # Initialize follower
     from config import FollowerConfig

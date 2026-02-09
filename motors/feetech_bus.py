@@ -83,13 +83,229 @@ class FeetechMotorsBus(MotorsBus):
         self._sync_writer = None  # GroupSyncWrite for batch writes
         self.motors = motors or {}
         self.calibration = calibration if calibration else {}
+        self._calibration_starting_positions: Dict[str, float] = {}  # Track starting positions for calibration quality check
 
-    def connect(self) -> None:
-        """Connect to the motor bus."""
-        if self._connected:
-            raise DeviceAlreadyConnectedError(
-                f"Motor bus on {self.port} is already connected"
+    @staticmethod
+    def _patch_port_handler(port_handler) -> None:
+        """
+        Patch PortHandler to fix scservo_sdk bug.
+
+        HACK: This patches the PortHandler behavior to set the correct packet timeouts.
+        It fixes https://gitee.com/ftservo/SCServoSDK/issues/IBY2S6
+        The bug is fixed on the official Feetech SDK repo (https://gitee.com/ftservo/FTServo_Python)
+        but because that version is not published on PyPI, we rely on the (unofficial) one that is, which needs
+        patching.
+
+        Args:
+            port_handler: PortHandler instance to patch
+        """
+        from scservo_sdk import PortHandler
+
+        def patch_setPacketTimeout(self, packet_length):  # noqa: N802
+            """Patched setPacketTimeout method."""
+            self.packet_start_time = self.getCurrentTime()
+            self.packet_timeout = (
+                (self.tx_time_per_byte * packet_length) + (self.tx_time_per_byte * 3.0) + 50
             )
+
+        port_handler.setPacketTimeout = patch_setPacketTimeout.__get__(port_handler, PortHandler)
+
+    def _clear_serial_buffers(self, port_handler) -> None:
+        """
+        Clear input and output buffers on the serial port using PortHandler.
+
+        Args:
+            port_handler: Already opened PortHandler instance
+        """
+        try:
+            # Try to clear port buffers if method exists
+            if hasattr(port_handler, "clearPort"):
+                port_handler.clearPort()
+                logger.debug(f"Cleared buffers on {self.port}")
+            else:
+                # If clearPort doesn't exist, just log
+                logger.debug(f"clearPort() not available on PortHandler")
+        except Exception as e:
+            logger.debug(f"Could not clear buffers: {e}")
+
+    def _resync_motor_protocol(self, port_handler, packet_handler, motor_id: int = 1) -> bool:
+        """
+        Attempt to resync with motor by sending ping commands.
+        This helps clear any misaligned protocol state.
+
+        Uses protocol version 0 (same as FeetechMotorsBus for STS3215 motors).
+
+        Args:
+            port_handler: Already opened PortHandler instance
+            packet_handler: PacketHandler instance
+            motor_id: Motor ID to ping (default: 1)
+
+        Returns:
+            True if ping succeeded, False otherwise
+        """
+        try:
+            # Clear buffers first if method exists
+            if hasattr(port_handler, "clearPort"):
+                port_handler.clearPort()
+            time.sleep(0.1)
+
+            # Send ping to motor - this is a minimal command to test communication
+            # Ping typically gets a response, helping resync protocol
+            ping_result = packet_handler.ping(port_handler, motor_id)
+            return ping_result == 0  # Return True if ping succeeded
+        except Exception as e:
+            logger.debug(f"Resync failed for motor {motor_id}: {e}")
+            return False
+
+    def _preflight_check_motors(self, max_retries: int = 3) -> bool:
+        """
+        Complete pre-flight check before calibration:
+        1. Open port and clear buffers
+        2. Verify each motor responds by reading Present_Position register
+
+        Uses register read instead of ping for more reliable communication check.
+
+        Args:
+            max_retries: Maximum number of retry attempts per motor
+
+        Returns:
+            True if all motors respond, False otherwise
+        """
+        logger.info("Running pre-flight motor check...")
+
+        if not self.motors:
+            logger.warning("No motors configured, skipping preflight check")
+            return True
+
+        motor_ids = [motor.id for motor in self.motors.values()]
+        if not motor_ids:
+            logger.warning("No motor IDs found, skipping preflight check")
+            return True
+
+        try:
+            import scservo_sdk as scs
+            from scservo_sdk import PacketHandler, PortHandler
+        except ImportError:
+            logger.warning("scservo_sdk not available, skipping motor verification")
+            return True
+
+        port_handler = None
+        try:
+            port_handler = PortHandler(self.port)
+            port_handler.setBaudRate(self.baudrate)
+
+            # Apply patch BEFORE opening port (consistent with connect())
+            self._patch_port_handler(port_handler)
+
+            if not port_handler.openPort():
+                logger.error(f"Could not open port {self.port}")
+                return False
+
+            time.sleep(0.3)  # Let port stabilize after opening
+
+            # Clear buffers using PortHandler
+            self._clear_serial_buffers(port_handler)
+            time.sleep(0.2)
+
+            # Use protocol version 0 (same as FeetechMotorsBus for STS3215 motors)
+            packet_handler = PacketHandler(0)
+            comm_success = scs.COMM_SUCCESS
+
+            # Verify each motor responds by reading Present_Position register
+            # This is more reliable than ping for STS3215 motors
+            addr, length = ADDR_PRESENT_POSITION[0], ADDR_PRESENT_POSITION[1]
+            failed_motors = []
+
+            for motor_id in motor_ids:
+                success = False
+                for attempt in range(max_retries):
+                    try:
+                        # Read Present_Position register (2 bytes for STS3215)
+                        if length == 2:
+                            position_raw, result, error = packet_handler.read2ByteTxRx(
+                                port_handler, motor_id, addr
+                            )
+                        elif length == 4:
+                            position_raw, result, error = packet_handler.read4ByteTxRx(
+                                port_handler, motor_id, addr
+                            )
+                        else:
+                            logger.warning(f"Unsupported position register length: {length}")
+                            break
+
+                        if result == comm_success:
+                            # Verify we got a valid position value (0-4095 for STS3215)
+                            if 0 <= position_raw <= 4095:
+                                logger.debug(f"Motor {motor_id}: ✓ OK (position: {position_raw})")
+                                success = True
+                                break
+                            else:
+                                logger.debug(
+                                    f"Motor {motor_id} returned invalid position: {position_raw}"
+                                )
+                        else:
+                            # Log the actual error result for debugging
+                            error_msg = (
+                                packet_handler.getTxRxResult(result)
+                                if hasattr(packet_handler, "getTxRxResult")
+                                else f"Error code: {result}"
+                            )
+                            logger.debug(
+                                f"Motor {motor_id} read attempt {attempt + 1} failed: {error_msg}"
+                            )
+
+                        time.sleep(0.15)  # Delay between retries
+                    except Exception as e:
+                        logger.debug(
+                            f"Motor {motor_id} read attempt {attempt + 1} raised exception: {e}"
+                        )
+                        time.sleep(0.15)
+
+                if not success:
+                    failed_motors.append(motor_id)
+                    logger.error(f"Motor {motor_id}: ✗ NO RESPONSE after {max_retries} attempts")
+
+            if failed_motors:
+                logger.error(f"Failed motors: {failed_motors}")
+                return False
+
+            logger.info("All motors responding ✓")
+            return True
+
+        except Exception as e:
+            logger.error(f"Preflight check failed: {e}", exc_info=True)
+            return False
+        finally:
+            if port_handler:
+                try:
+                    port_handler.closePort()
+                except Exception:
+                    pass
+
+    def connect(self, preflight_check: bool = True) -> None:
+        """
+        Connect to the motor bus.
+
+        Args:
+            preflight_check: If True, run preflight check before connecting.
+                            This clears buffers, resyncs protocol, and verifies motors respond.
+                            Default is False to avoid timing issues during calibration.
+        """
+        if self._connected:
+            raise DeviceAlreadyConnectedError(f"Motor bus on {self.port} is already connected")
+
+        # Run preflight check before connecting (clears buffers, resyncs protocol, verifies motors)
+        if preflight_check:
+            logger.info("Running pre-flight check before connecting...")
+            if not self._preflight_check_motors():
+                motor_ids = [motor.id for motor in self.motors.values()] if self.motors else []
+                raise ConnectionError(
+                    f"Pre-flight check failed for motors {motor_ids} on {self.port}. "
+                    "Check connections and power."
+                )
+            logger.info("Pre-flight check passed ✓")
+            # Small delay to ensure port is fully released before reopening
+            time.sleep(0.2)
 
         try:
             # Import scservo_sdk here to avoid dependency issues if not installed
@@ -101,25 +317,13 @@ class FeetechMotorsBus(MotorsBus):
             self._port_handler.setBaudRate(self.baudrate)
 
             # Patch packet timeout to fix scservo_sdk bug
-            def patch_setPacketTimeout(self, packet_length):  # noqa: N802
-                """
-                HACK: This patches the PortHandler behavior to set the correct packet timeouts.
-
-                It fixes https://gitee.com/ftservo/SCServoSDK/issues/IBY2S6
-                The bug is fixed on the official Feetech SDK repo (https://gitee.com/ftservo/FTServo_Python)
-                but because that version is not published on PyPI, we rely on the (unofficial) one that is, which needs
-                patching.
-                """
-                self.packet_start_time = self.getCurrentTime()
-                self.packet_timeout = (self.tx_time_per_byte * packet_length) + (self.tx_time_per_byte * 3.0) + 50
-
-            self._port_handler.setPacketTimeout = patch_setPacketTimeout.__get__(
-                self._port_handler, PortHandler
-            )
+            self._patch_port_handler(self._port_handler)
 
             # Open port
             if not self._port_handler.openPort():
                 raise ConnectionError(f"Failed to open port: {self.port}")
+
+            time.sleep(0.2)  # Let port stabilize after opening
 
             # Initialize packet handler
             # STS3215 motors use protocol version 0
@@ -131,9 +335,18 @@ class FeetechMotorsBus(MotorsBus):
 
             # Initialize sync reader and writer
             # These are configured per-operation using _setup_sync_reader/_setup_sync_writer
+            # Recreate sync reader/writer on each connection to avoid caching issues
             from scservo_sdk import GroupSyncRead, GroupSyncWrite
+
             self._sync_reader = GroupSyncRead(self._port_handler, self._packet_handler, 0, 0)
             self._sync_writer = GroupSyncWrite(self._port_handler, self._packet_handler, 0, 0)
+
+            # Clear buffers after opening to remove any stale data from preflight check
+            self._clear_serial_buffers(self._port_handler)
+            time.sleep(0.2)
+
+            # Ensure sync reader is properly initialized
+            self._sync_reader.clearParam()
 
             self._connected = True
         except ImportError as e:
@@ -164,21 +377,24 @@ class FeetechMotorsBus(MotorsBus):
             addr: Register address to read from
             length: Number of bytes to read
         """
+        # Clear parameters to ensure no cached data is used
         self._sync_reader.clearParam()
         self._sync_reader.start_address = addr
         self._sync_reader.data_length = length
         for motor_id in motor_ids:
             self._sync_reader.addParam(motor_id)
 
-    def sync_read_positions(self, motor_ids: List[int], num_retry: int = 0) -> Dict[int, float]:
+    def sync_read_positions(self, motor_ids: List[int], num_retry: int = 0, use_sequential: bool = False) -> Dict[int, float]:
         """
         Synchronously read positions from multiple motors using batch read.
 
         Uses GroupSyncRead for efficient batch reading (single packet for all motors).
+        Can fall back to sequential reads to avoid caching issues.
 
         Args:
             motor_ids: List of motor IDs to read from
             num_retry: Number of retry attempts on communication failure
+            use_sequential: If True, use sequential reads instead of sync read (avoids caching)
 
         Returns:
             Dictionary mapping motor ID to position value
@@ -188,9 +404,16 @@ class FeetechMotorsBus(MotorsBus):
         if not motor_ids:
             return {}
 
-        # Setup sync reader 
+        # Use sequential reads if requested (for calibration to avoid caching)
+        if use_sequential:
+            return self._sync_read_positions_sequential(motor_ids, num_retry)
+
+        # Setup sync reader - clear first to avoid cached data
         # Extract address and length from tuple
         addr, length = ADDR_PRESENT_POSITION[0], ADDR_PRESENT_POSITION[1]
+        
+        # Explicitly clear before setup to ensure no cached data
+        self._sync_reader.clearParam()
         self._setup_sync_reader(motor_ids, addr, length)
 
         # Execute batch read with retries
@@ -204,7 +427,9 @@ class FeetechMotorsBus(MotorsBus):
                 + self._packet_handler.getTxRxResult(comm)
             )
             if n_try < num_retry:
-                logger.debug(f"sync_read_positions failed (try {n_try + 1}/{num_retry + 1}): {comm}")
+                logger.debug(
+                    f"sync_read_positions failed (try {n_try + 1}/{num_retry + 1}): {comm}"
+                )
 
         positions: Dict[int, float] = {}
         if comm == self._comm_success:
@@ -216,7 +441,9 @@ class FeetechMotorsBus(MotorsBus):
 
         return positions
 
-    def _sync_read_positions_sequential(self, motor_ids: List[int], num_retry: int = 0) -> Dict[int, float]:
+    def _sync_read_positions_sequential(
+        self, motor_ids: List[int], num_retry: int = 0
+    ) -> Dict[int, float]:
         """Fallback sequential read implementation."""
         positions: Dict[int, float] = {}
         for motor_id in motor_ids:
@@ -232,9 +459,7 @@ class FeetechMotorsBus(MotorsBus):
                 else:
                     raise ValueError(f"Unsupported length: {length}")
 
-                position_raw, result, error = read_fn(
-                    self._port_handler, motor_id, addr
-                )
+                position_raw, result, error = read_fn(self._port_handler, motor_id, addr)
                 if result != self._comm_success:
                     if n_try < num_retry:
                         continue
@@ -265,7 +490,7 @@ class FeetechMotorsBus(MotorsBus):
         if not motor_ids:
             return {}
 
-        # Setup sync reader 
+        # Setup sync reader
         # Extract address and length from tuple
         addr, length = ADDR_PRESENT_VELOCITY[0], ADDR_PRESENT_VELOCITY[1]
         self._setup_sync_reader(motor_ids, addr, length)
@@ -277,11 +502,13 @@ class FeetechMotorsBus(MotorsBus):
             if comm == self._comm_success:
                 break
             if n_try < num_retry:
-                logger.debug(f"sync_read_velocities failed (try {n_try + 1}/{num_retry + 1}): {comm}")
+                logger.debug(
+                    f"sync_read_velocities failed (try {n_try + 1}/{num_retry + 1}): {comm}"
+                )
 
         velocities = {}
         if comm == self._comm_success:
-            # Extract values from batch read 
+            # Extract values from batch read
             # Just calls getData directly without checking isAvailable
             addr, length = ADDR_PRESENT_VELOCITY[0], ADDR_PRESENT_VELOCITY[1]
             for motor_id in motor_ids:
@@ -294,7 +521,9 @@ class FeetechMotorsBus(MotorsBus):
 
         return velocities
 
-    def _sync_read_velocities_sequential(self, motor_ids: List[int], num_retry: int = 0) -> Dict[int, float]:
+    def _sync_read_velocities_sequential(
+        self, motor_ids: List[int], num_retry: int = 0
+    ) -> Dict[int, float]:
         """Fallback sequential read implementation."""
         velocities = {}
         for motor_id in motor_ids:
@@ -310,9 +539,7 @@ class FeetechMotorsBus(MotorsBus):
                 else:
                     raise ValueError(f"Unsupported length: {length}")
 
-                velocity_raw, result, error = read_fn(
-                    self._port_handler, motor_id, addr
-                )
+                velocity_raw, result, error = read_fn(self._port_handler, motor_id, addr)
                 if result != self._comm_success:
                     if n_try < num_retry:
                         continue
@@ -371,7 +598,9 @@ class FeetechMotorsBus(MotorsBus):
 
         return loads
 
-    def _sync_read_loads_sequential(self, motor_ids: List[int], num_retry: int = 0) -> Dict[int, float]:
+    def _sync_read_loads_sequential(
+        self, motor_ids: List[int], num_retry: int = 0
+    ) -> Dict[int, float]:
         """Fallback sequential read implementation."""
         loads = {}
         for motor_id in motor_ids:
@@ -387,9 +616,7 @@ class FeetechMotorsBus(MotorsBus):
                 else:
                     raise ValueError(f"Unsupported length: {length}")
 
-                load_raw, result, error = read_fn(
-                    self._port_handler, motor_id, addr
-                )
+                load_raw, result, error = read_fn(self._port_handler, motor_id, addr)
                 if result != self._comm_success:
                     if n_try < num_retry:
                         continue
@@ -419,9 +646,7 @@ class FeetechMotorsBus(MotorsBus):
             data = _split_into_byte_chunks(int(value), length)
             self._sync_writer.addParam(motor_id, data)
 
-    def sync_write_positions(
-        self, motor_positions: Dict[int, float], num_retry: int = 0
-    ) -> None:
+    def sync_write_positions(self, motor_positions: Dict[int, float], num_retry: int = 0) -> None:
         """
         Synchronously write positions to multiple motors using batch write.
 
@@ -454,12 +679,16 @@ class FeetechMotorsBus(MotorsBus):
             if comm == self._comm_success:
                 break
             if n_try < num_retry:
-                logger.debug(f"sync_write_positions failed (try {n_try + 1}/{num_retry + 1}): {comm}")
+                logger.debug(
+                    f"sync_write_positions failed (try {n_try + 1}/{num_retry + 1}): {comm}"
+                )
 
         if comm != self._comm_success:
             logger.warning(f"sync_write_positions failed after {num_retry + 1} tries: {comm}")
 
-    def _sync_write_positions_sequential(self, motor_positions: Dict[int, float], num_retry: int = 0) -> None:
+    def _sync_write_positions_sequential(
+        self, motor_positions: Dict[int, float], num_retry: int = 0
+    ) -> None:
         """Fallback sequential write implementation."""
         addr, length = ADDR_GOAL_POSITION[0], ADDR_GOAL_POSITION[1]
         for motor_id, position in motor_positions.items():
@@ -494,9 +723,7 @@ class FeetechMotorsBus(MotorsBus):
         addr, length = ADDR_TORQUE_ENABLE[0], ADDR_TORQUE_ENABLE[1]
         for motor_id in motor_ids:
             data = _split_into_byte_chunks(TORQUE_ENABLE, length)
-            self._packet_handler.writeTxRx(
-                self._port_handler, motor_id, addr, length, data
-            )
+            self._packet_handler.writeTxRx(self._port_handler, motor_id, addr, length, data)
 
     def disable_torque(self, motor_ids: Optional[List[int]] = None) -> None:
         """
@@ -513,9 +740,7 @@ class FeetechMotorsBus(MotorsBus):
         addr, length = ADDR_TORQUE_ENABLE[0], ADDR_TORQUE_ENABLE[1]
         for motor_id in motor_ids:
             data = _split_into_byte_chunks(TORQUE_DISABLE, length)
-            self._packet_handler.writeTxRx(
-                self._port_handler, motor_id, addr, length, data
-            )
+            self._packet_handler.writeTxRx(self._port_handler, motor_id, addr, length, data)
 
     def write(self, register_name: str, motor_name: str, value: int) -> None:
         """
@@ -550,7 +775,9 @@ class FeetechMotorsBus(MotorsBus):
 
         addr, length = register_map[register_name][0], register_map[register_name][1]
         data = _split_into_byte_chunks(value, length)
-        result, error = self._packet_handler.writeTxRx(self._port_handler, motor_id, addr, length, data)
+        result, error = self._packet_handler.writeTxRx(
+            self._port_handler, motor_id, addr, length, data
+        )
 
         # Check for communication errors
         if result != self._comm_success:
@@ -559,6 +786,26 @@ class FeetechMotorsBus(MotorsBus):
                 f"result={result}, error={error}"
             )
             # Don't raise exception - allow operation to continue, but log the error
+
+    def reset_homing_offsets(self) -> None:
+        """
+        Reset homing offsets to 0 for all motors.
+        
+        This ensures we read true raw positions without any offset applied.
+        Should be called at the start of calibration to ensure consistent readings.
+        """
+        self._ensure_connected()
+
+        for motor_name, motor in self.motors.items():
+            try:
+                # Write homing offset of 0 (no offset)
+                encoded = encode_sign_magnitude(0, sign_bit=ENCODING_BIT_HOMING_OFFSET)
+                addr, length = ADDR_HOMING_OFFSET[0], ADDR_HOMING_OFFSET[1]
+                data = _split_into_byte_chunks(encoded, length)
+                self._packet_handler.writeTxRx(self._port_handler, motor.id, addr, length, data)
+                logger.debug(f"Reset homing offset for {motor_name} (ID: {motor.id})")
+            except Exception as e:
+                logger.warning(f"Failed to reset homing offset for {motor_name}: {e}")
 
     def set_half_turn_homings(self) -> Dict[str, float]:
         """
@@ -573,15 +820,18 @@ class FeetechMotorsBus(MotorsBus):
         self._ensure_connected()
 
         # Read current positions
+        # Use sequential reads for calibration to avoid GroupSyncRead caching issues
         motor_ids = [motor.id for motor in self.motors.values()]
-        current_positions = self.sync_read_positions(motor_ids)
+        current_positions = self.sync_read_positions(motor_ids, use_sequential=True)
 
         half_turn = 2048  # Half of 4096 (full range) - the desired "zero" position
         homing_offsets = {}
 
         for motor_name, motor in self.motors.items():
             if motor.id not in current_positions:
-                logger.warning(f"Could not read position for {motor_name} (ID: {motor.id}), skipping")
+                logger.warning(
+                    f"Could not read position for {motor_name} (ID: {motor.id}), skipping"
+                )
                 continue
 
             current_pos = current_positions[motor.id]
@@ -598,9 +848,7 @@ class FeetechMotorsBus(MotorsBus):
             # Write homing offset using length from tuple to determine which write function to use
             addr, length = ADDR_HOMING_OFFSET[0], ADDR_HOMING_OFFSET[1]
             data = _split_into_byte_chunks(encoded, length)
-            self._packet_handler.writeTxRx(
-                self._port_handler, motor.id, addr, length, data
-            )
+            self._packet_handler.writeTxRx(self._port_handler, motor.id, addr, length, data)
 
             homing_offsets[motor_name] = float(homing_offset)
             logger.debug(
@@ -608,7 +856,65 @@ class FeetechMotorsBus(MotorsBus):
                 f"homing_offset={homing_offset:.1f}"
             )
 
+        # Store starting positions AFTER homing offset is applied
+        # Read the actual displayed positions (raw values after offset)
+        time.sleep(0.1)  # Brief delay for offsets to take effect
+        self._calibration_starting_positions = {}
+        post_offset_positions = self.sync_read_positions(motor_ids, use_sequential=True)
+        for motor_name, motor in self.motors.items():
+            if motor.id in post_offset_positions:
+                # Store the raw position as displayed (after homing offset is applied)
+                self._calibration_starting_positions[motor_name] = post_offset_positions[motor.id]
+
         return homing_offsets
+
+    def _check_calibration_quality(
+        self,
+        motor_name: str,
+        range_min: float,
+        range_max: float,
+    ) -> bool:
+        """
+        Check if a motor has been properly calibrated based on range coverage.
+
+        Uses the raw positions as displayed in calibration (after homing offset is applied).
+        
+        For RANGE_M100_100 motors: Checks if range covers ±10% of starting position
+        For RANGE_0_100 motors: Checks if range covers +10% of starting position
+
+        Args:
+            motor_name: Name of the motor
+            range_min: Minimum recorded position (raw, as displayed)
+            range_max: Maximum recorded position (raw, as displayed)
+
+        Returns:
+            True if calibration is adequate, False otherwise
+        """
+        if motor_name not in self._calibration_starting_positions:
+            return False  # No starting position recorded
+
+        motor = self.motors.get(motor_name)
+        if not motor:
+            return False
+
+        starting_pos = self._calibration_starting_positions[motor_name]  # Raw position as displayed
+        full_range = 4095.0
+        threshold = full_range * 0.10  # 10% of full range = 409.5
+
+        if motor.norm_mode.value == "range_0_100":
+            # For 0_100 range, check if max covers +10% of starting position
+            upper_boundary = starting_pos + threshold
+            return range_max >= upper_boundary
+        elif motor.norm_mode.value == "range_m100_100":
+            # For m100_100 range, check if range covers ±10% of starting position
+            upper_boundary = starting_pos + threshold
+            lower_boundary = starting_pos - threshold
+            return range_min <= lower_boundary and range_max >= upper_boundary
+        else:
+            # For other modes (degrees), use m100_100 logic
+            upper_boundary = starting_pos + threshold
+            lower_boundary = starting_pos - threshold
+            return range_min <= lower_boundary and range_max >= upper_boundary
 
     def _raw_to_degrees(self, raw_value: float) -> float:
         """
@@ -655,22 +961,18 @@ class FeetechMotorsBus(MotorsBus):
             show_min_max: Whether to show min/max columns
         """
         lines = []
-        lines.append("\n" + "=" * 80)
+        lines.append("\n" + "=" * 90)
 
         if show_min_max:
-            lines.append(
-                f"{'Motor':<20} {'ID':<5} {'Current':<12} {'Min':<12} {'Max':<12}"
-            )
-            lines.append("-" * 80)
-            lines.append(
-                f"{'':<20} {'':<5} {'Raw':<12} {'Raw':<12} {'Raw':<12}"
-            )
+            lines.append(f"{'Motor':<20} {'ID':<5} {'Current':<12} {'Min':<12} {'Max':<12} {'Status':<8}")
+            lines.append("-" * 90)
+            lines.append(f"{'':<20} {'':<5} {'Raw':<12} {'Raw':<12} {'Raw':<12} {'':<8}")
         else:
             lines.append(f"{'Motor':<20} {'ID':<5} {'Current Position':<12}")
             lines.append("-" * 80)
             lines.append(f"{'':<20} {'':<5} {'Raw':<12}")
 
-        lines.append("-" * 80)
+        lines.append("-" * 90)
 
         for motor_name in motor_names:
             motor = self.motors[motor_name]
@@ -685,28 +987,37 @@ class FeetechMotorsBus(MotorsBus):
                 # Handle inf values
                 if min_raw == float("inf"):
                     min_raw_str = "   ---"
+                    is_calibrated = False
                 else:
                     min_raw = max(0.0, min(4095.0, min_raw))
                     min_raw_str = f"{min_raw:>9.1f}"
 
                 if max_raw == float("-inf"):
                     max_raw_str = "   ---"
+                    is_calibrated = False
                 else:
                     max_raw = max(0.0, min(4095.0, max_raw))
                     max_raw_str = f"{max_raw:>9.1f}"
 
-                # Format values (raw only)
+                # Check calibration quality
+                if min_raw != float("inf") and max_raw != float("-inf"):
+                    is_calibrated = self._check_calibration_quality(motor_name, min_raw, max_raw)
+                else:
+                    is_calibrated = False
+
+                # Status indicator: 🟡 (yellow) for good calibration, 🔴 (red) for incomplete
+                status_indicator = "🟡" if is_calibrated else "🔴"
+
+                # Format values (raw only) with status indicator
                 lines.append(
                     f"{motor_name:<20} {motor.id:<5} "
-                    f"{current_raw:>9.1f}   {min_raw_str}   {max_raw_str}"
+                    f"{current_raw:>9.1f}   {min_raw_str}   {max_raw_str}   {status_indicator}"
                 )
             else:
                 # Format values (current only)
-                lines.append(
-                    f"{motor_name:<20} {motor.id:<5} {current_raw:>9.1f}"
-                )
+                lines.append(f"{motor_name:<20} {motor.id:<5} {current_raw:>9.1f}")
 
-        lines.append("=" * 80)
+        lines.append("=" * 90)
         return "\n".join(lines)
 
     def display_current_positions(self, motor_names: Optional[List[str]] = None) -> None:
@@ -722,7 +1033,8 @@ class FeetechMotorsBus(MotorsBus):
             motor_names = list(self.motors.keys())
 
         motor_ids = [self.motors[name].id for name in motor_names]
-        positions = self.sync_read_positions(motor_ids)
+        # Use sequential reads for calibration to avoid GroupSyncRead caching issues
+        positions = self.sync_read_positions(motor_ids, use_sequential=True)
 
         current_positions = {}
         for motor_name, motor_id in zip(motor_names, motor_ids):
@@ -733,9 +1045,7 @@ class FeetechMotorsBus(MotorsBus):
         )
         print(display_text)
 
-    def record_ranges_of_motion(
-        self, motor_names: Optional[List[str]] = None
-    ) -> tuple:
+    def record_ranges_of_motion(self, motor_names: Optional[List[str]] = None) -> tuple:
         """
         Record min and max positions while user moves joints.
 
@@ -764,9 +1074,6 @@ class FeetechMotorsBus(MotorsBus):
         # Keep last N positions to detect spurious readings
         recent_positions = {name: [] for name in motor_names}
         RECENT_WINDOW_SIZE = 5  # Keep last 5 readings
-        # Outlier detection: if a value is more than 1000 units away from median of recent values,
-        # it's likely a communication error (especially for spurious low values like 0-10)
-        OUTLIER_THRESHOLD = 1000.0
 
         # Thread-safe flag for stopping
         stop_recording = threading.Event()
@@ -777,23 +1084,13 @@ class FeetechMotorsBus(MotorsBus):
             motor_ids = {name: self.motors[name].id for name in motor_names}
 
             while not stop_recording.is_set():
-                positions = self.sync_read_positions(list(motor_ids.values()))
+                # Use sequential reads for calibration to avoid GroupSyncRead caching issues
+                positions = self.sync_read_positions(list(motor_ids.values()), use_sequential=True)
 
                 with display_lock:
                     for motor_name, motor_id in motor_ids.items():
                         if motor_id in positions:
                             pos = positions[motor_id]
-
-                            # Simple outlier detection: compare with recent values
-                            # This filters spurious readings (like 0-10) when motor is actually at 2000+
-                            # if len(recent_positions[motor_name]) >= 3:
-                            #     # Calculate median of recent positions
-                            #     recent_sorted = sorted(recent_positions[motor_name])
-                            #     median_pos = recent_sorted[len(recent_sorted) // 2]
-                            #     # If new value is way off from median, it's likely a communication error
-                            #     if abs(pos - median_pos) > OUTLIER_THRESHOLD:
-                            #         # Skip this reading - it's likely noise
-                            #         continue
 
                             # Update recent positions window
                             recent_positions[motor_name].append(pos)
@@ -809,7 +1106,6 @@ class FeetechMotorsBus(MotorsBus):
                                 range_maxes[motor_name] = pos
 
                 time.sleep(0.01)  # 100 Hz sampling rate
-
 
         def display_loop():
             """Continuously update and display calibration table."""
@@ -895,9 +1191,15 @@ class FeetechMotorsBus(MotorsBus):
         result = {}
         for motor_id, raw_value in raw_values.items():
             motor_name = id_to_name[motor_id]
-            if normalize and data_name == "Present_Position" and self.calibration and motor_name in self.calibration:
+            if (
+                normalize
+                and data_name == "Present_Position"
+                and self.calibration
+                and motor_name in self.calibration
+            ):
                 # Normalize using calibration
                 from utils import convert_position_with_calibration
+
                 motor = self.motors[motor_name]
                 calib = self.calibration[motor_name]
                 calib_data = {
@@ -958,6 +1260,7 @@ class FeetechMotorsBus(MotorsBus):
             if normalize and self.calibration and motor_name in self.calibration:
                 # Unnormalize using calibration
                 from utils import denormalize_position
+
                 calib = self.calibration[motor_name]
                 calib_data = {
                     motor_name: {
@@ -1026,4 +1329,3 @@ class FeetechMotorsBus(MotorsBus):
             self._packet_handler.writeTxRx(
                 self._port_handler, motor_id, offset_addr, offset_length, offset_data
             )
-
