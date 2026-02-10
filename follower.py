@@ -3,7 +3,9 @@
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional
-from cyberwave import camera
+
+from serial.serialutil import SerialException
+
 from config import FollowerConfig
 from errors import DeviceNotConnectedError
 from motors import (
@@ -199,11 +201,20 @@ class SO101Follower(SO101Robot):
         # Cap goal position when too far away from present position
         # /!\ Slower fps expected due to reading from the follower.
         if self.config.max_relative_target is not None:
-            present_pos = self.bus.sync_read("Present_Position", normalize=True)
-            goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in goal_pos.items()}
-            from utils import ensure_safe_goal_position
+            try:
+                present_pos = self.bus.sync_read("Present_Position", normalize=True)
+                goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in goal_pos.items()}
+                from utils import ensure_safe_goal_position
 
-            goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
+                goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
+            except SerialException as e:
+                logger.warning(f"Serial communication error reading follower positions for safety check: {e}. Skipping safety check.")
+                # Use last known positions if available for safety check
+                if self._current_positions:
+                    present_pos = {k.removesuffix(".pos"): v for k, v in self._current_positions.items()}
+                    goal_present_pos = {key: (g_pos, present_pos.get(key, g_pos)) for key, g_pos in goal_pos.items()}
+                    from utils import ensure_safe_goal_position
+                    goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
 
         # Send goal position to the arm (bus handles normalization automatically)
         self.bus.sync_write("Goal_Position", goal_pos, normalize=True)
@@ -229,11 +240,18 @@ class SO101Follower(SO101Robot):
         if not self.connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
-        # Read arm position (bus handles normalization automatically)
-        obs_dict = self.bus.sync_read("Present_Position", normalize=True)
-        obs_dict = {f"{motor}.pos": val for motor, val in obs_dict.items()}
-
-        return obs_dict
+        try:
+            # Read arm position (bus handles normalization automatically)
+            obs_dict = self.bus.sync_read("Present_Position", normalize=True)
+            obs_dict = {f"{motor}.pos": val for motor, val in obs_dict.items()}
+            # Update current positions on successful read
+            self._current_positions = obs_dict
+            return obs_dict
+        except SerialException as e:
+            logger.warning(f"Serial communication error reading follower positions: {e}. Using last known positions.")
+            # Return last known positions if available, otherwise empty dict
+            # Don't mark as disconnected - this could be a transient error
+            return self._current_positions if self._current_positions else {}
 
     @property
     def torque_enabled(self) -> bool:

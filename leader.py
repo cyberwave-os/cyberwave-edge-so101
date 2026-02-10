@@ -2,7 +2,9 @@
 
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
+
+from serial.serialutil import SerialException
 
 from config import LeaderConfig
 from errors import DeviceNotConnectedError
@@ -48,6 +50,7 @@ class SO101Leader(SO101Robot):
             )
 
         self.calibration: Optional[Dict[str, MotorCalibration]] = None
+        self._last_known_positions: Dict[str, float] = {}
 
     @property
     def connected(self) -> bool:
@@ -90,6 +93,12 @@ class SO101Leader(SO101Robot):
         self._connected = True
         # Leader is passive (torque disabled) - user moves it manually
         # Torque remains disabled unless explicitly enabled
+        # Read initial positions
+        try:
+            self._last_known_positions = self.get_action()
+        except Exception:
+            # If we can't read initial positions, start with empty dict
+            self._last_known_positions = {}
         logger.info("Leader connected successfully (torque disabled - passive mode)")
 
     def get_action(self) -> Dict[str, float]:
@@ -102,11 +111,18 @@ class SO101Leader(SO101Robot):
         if not self.connected:
             raise DeviceNotConnectedError("Leader is not connected")
 
-        # Read normalized positions (bus handles normalization automatically)
-        action = self.bus.sync_read("Present_Position", normalize=True)
-        action = {f"{motor}.pos": val for motor, val in action.items()}
-
-        return action
+        try:
+            # Read normalized positions (bus handles normalization automatically)
+            action = self.bus.sync_read("Present_Position", normalize=True)
+            action = {f"{motor}.pos": val for motor, val in action.items()}
+            # Update last known positions on successful read
+            self._last_known_positions = action
+            return action
+        except SerialException as e:
+            logger.warning(f"Serial communication error reading leader positions: {e}. Using last known positions.")
+            # Return last known positions if available, otherwise empty dict
+            # Don't mark as disconnected - this could be a transient error
+            return self._last_known_positions if self._last_known_positions else {}
 
     def get_observation(self) -> Dict[str, float]:
         """
