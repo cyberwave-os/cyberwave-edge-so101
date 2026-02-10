@@ -14,7 +14,7 @@ from motors import (
     MotorNormMode,
 )
 from motors.tables import MODE_POSITION
-from utils import load_calibration, save_calibration, validate_calibration_ranges
+from utils import load_calibration, save_calibration
 
 logger = logging.getLogger(__name__)
 
@@ -223,9 +223,6 @@ class SO101Leader:
             "of motion.\nRecording positions. Press ENTER to stop..."
         )
         range_mins, range_maxes = self.bus.record_ranges_of_motion()
-
-        # Validate ranges and display alerts for invalid joints
-        validate_calibration_ranges(range_mins, range_maxes, self.motors)
 
         self.calibration = {}
         for motor_name, motor in self.motors.items():

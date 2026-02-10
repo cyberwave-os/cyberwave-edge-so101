@@ -1122,10 +1122,31 @@ class FeetechMotorsBus(MotorsBus):
                     display_text = self._format_calibration_display(
                         motor_names, current_positions, range_mins, range_maxes
                     )
+                    
+                    # Check for invalid ranges and add warnings to display
+                    warnings_text = ""
+                    try:
+                        from utils import validate_calibration_ranges, format_calibration_warnings
+                        # Create temporary dicts with current values (replace inf with actual values for validation)
+                        temp_mins = {name: range_mins[name] if range_mins[name] != float("inf") else 0.0 for name in motor_names}
+                        temp_maxes = {name: range_maxes[name] if range_maxes[name] != float("-inf") else 4095.0 for name in motor_names}
+                        motors_dict = {name: self.motors[name] for name in motor_names if name in self.motors}
+                        
+                        # Check if there are invalid ranges
+                        if motors_dict:
+                            invalid_joints = validate_calibration_ranges(temp_mins, temp_maxes, motors_dict)
+                            
+                            # Format warnings text if invalid joints found (without action required for real-time display)
+                            if invalid_joints:
+                                warnings_text = format_calibration_warnings(invalid_joints, motors_dict, include_action_required=False)
+                    except ImportError:
+                        pass  # Skip validation if utils not available
 
                 # Clear screen and move cursor to top (ANSI escape codes)
                 sys.stdout.write("\033[2J\033[H")
                 sys.stdout.write(display_text)
+                if warnings_text:
+                    sys.stdout.write(warnings_text)
                 sys.stdout.write("\n\nPress ENTER to stop recording...")
                 sys.stdout.flush()
 
@@ -1155,9 +1176,9 @@ class FeetechMotorsBus(MotorsBus):
         # Replace inf values with defaults if no data was recorded
         for name in motor_names:
             if range_mins[name] == float("inf"):
-                range_mins[name] = 0.0
+                range_mins[name] = 10.0
             if range_maxes[name] == float("-inf"):
-                range_maxes[name] = 4095.0
+                range_maxes[name] = 4000.0
 
         return range_mins, range_maxes
 

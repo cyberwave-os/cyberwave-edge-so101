@@ -48,22 +48,27 @@ def validate_calibration_ranges(
     range_mins: Dict[str, float],
     range_maxes: Dict[str, float],
     motors: Dict[str, Any],
-) -> None:
+) -> List[Tuple[str, float, float, bool, bool, bool]]:
     """
-    Validate recorded calibration ranges and display red alerts for invalid joints.
+    Validate recorded calibration ranges and return list of invalid joints.
 
     Invalid ranges:
-    - Full range (0-4095): Not physically possible due to physical constraints
+    - Full range (0-4095 or very close): Not physically possible due to physical constraints
     - Min equals max (0-0 or 4095-4095): Invalid, no motion recorded
 
     Args:
         range_mins: Dictionary mapping motor names to minimum recorded positions
         range_maxes: Dictionary mapping motor names to maximum recorded positions
         motors: Dictionary mapping motor names to Motor objects (must have .id attribute)
+
+    Returns:
+        List of tuples: (motor_name, min_val, max_val, is_full_range, is_zero_range, is_suspiciously_large)
     """
     invalid_joints = []
     FULL_RANGE_MIN = 0
     FULL_RANGE_MAX = 4095
+    # Threshold for "suspiciously close to full range" (within 10 units)
+    FULL_RANGE_THRESHOLD = 10
 
     for motor_name in motors.keys():
         min_val = range_mins.get(motor_name, float("inf"))
@@ -74,90 +79,94 @@ def validate_calibration_ranges(
             continue
 
         # Check for invalid ranges
-        is_full_range = min_val == FULL_RANGE_MIN and max_val == FULL_RANGE_MAX
+        # Full range: min is very close to 0 AND max is very close to 4095
+        is_full_range = (
+            min_val <= FULL_RANGE_MIN + FULL_RANGE_THRESHOLD
+            and max_val >= FULL_RANGE_MAX - FULL_RANGE_THRESHOLD
+        )
+        # Zero range: min equals max
         is_zero_range = min_val == max_val
+        
+        # Check if range span is suspiciously large (close to full 4095 range)
+        range_span = max_val - min_val
+        is_suspiciously_large = range_span >= FULL_RANGE_MAX - FULL_RANGE_THRESHOLD
 
-        if is_full_range or is_zero_range:
-            invalid_joints.append((motor_name, min_val, max_val, is_full_range, is_zero_range))
+        if is_full_range or is_zero_range or is_suspiciously_large:
+            invalid_joints.append((motor_name, min_val, max_val, is_full_range, is_zero_range, is_suspiciously_large))
 
-    # Display alerts if any invalid joints found
-    if invalid_joints:
-        print("\n" + "=" * 90)
-        print("\033[91m" + "⚠️  CALIBRATION WARNING: Invalid joint ranges detected" + "\033[0m")
-        print("=" * 90)
-        for motor_name, min_val, max_val, is_full_range, is_zero_range in invalid_joints:
-            motor_id = motors[motor_name].id
-            print(
-                f"\n\033[91m{motor_name:<20} (ID: {motor_id:<3}) - Range: [{min_val:.1f}, {max_val:.1f}]\033[0m"
-            )
-            if is_full_range:
-                print("\033[91m  ❌ Full range (0-4095) detected - not physically possible\033[0m")
-            if is_zero_range:
-                print("\033[91m  ❌ Zero range detected - no motion recorded\033[0m")
-            print("\033[91m  → Action required:\033[0m")
-            print("\033[91m     1. Exit calibration (Ctrl+C)\033[0m")
-            print("\033[91m     2. Unplug power and USB cables from the robot\033[0m")
-            print("\033[91m     3. Wait 5 seconds\033[0m")
-            print("\033[91m     4. Reconnect and retry calibration\033[0m")
-        print("\n" + "=" * 90 + "\n")
+    return invalid_joints
 
 
-def validate_and_alert_calibration_ranges(
+def format_calibration_warnings(
+    invalid_joints: List[Tuple[str, float, float, bool, bool, bool]],
+    motors: Dict[str, Any],
+    include_action_required: bool = True,
+) -> str:
+    """
+    Format invalid joint warnings as a string for display.
+
+    Args:
+        invalid_joints: List of tuples from validate_calibration_ranges
+        motors: Dictionary mapping motor names to Motor objects (must have .id attribute)
+        include_action_required: Whether to include action required instructions
+
+    Returns:
+        Formatted warning string (empty if no invalid joints)
+    """
+    if not invalid_joints:
+        return ""
+
+    warnings_text = "\n\033[91m" + "=" * 90 + "\033[0m\n"
+    warnings_text += "\033[91m" + "⚠️  WARNING: Invalid joint ranges detected!" + "\033[0m\n"
+    warnings_text += "\033[91m" + "=" * 90 + "\033[0m"
+    
+    for motor_name, min_val, max_val, is_full_range, is_zero_range, is_suspiciously_large in invalid_joints:
+        motor_id = motors[motor_name].id
+        range_span = max_val - min_val
+        warnings_text += f"\n\033[91m{motor_name:<20} (ID: {motor_id:<3}) - Range: [{min_val:.1f}, {max_val:.1f}] (span: {range_span:.1f})\033[0m\n"
+        if is_full_range:
+            warnings_text += "\033[91m  ❌ Full range (0-4095 or very close) detected - not physically possible\033[0m\n"
+        elif is_suspiciously_large and not is_zero_range:
+            warnings_text += f"\033[91m  ❌ Range span ({range_span:.1f}) is suspiciously large - not physically possible\033[0m\n"
+        if is_zero_range:
+            warnings_text += "\033[91m  ❌ Zero range detected - no motion recorded\033[0m\n"
+        
+        if include_action_required:
+            warnings_text += "\033[91m  → Action required:\033[0m\n"
+            warnings_text += "\033[91m     1. Exit calibration (Ctrl+C)\033[0m\n"
+            warnings_text += "\033[91m     2. Unplug power and USB cables from the robot\033[0m\n"
+            warnings_text += "\033[91m     3. Wait 5 seconds\033[0m\n"
+            warnings_text += "\033[91m     4. Reconnect and retry calibration\033[0m\n"
+    
+    warnings_text += "\033[91m" + "=" * 90 + "\033[0m\n"
+    return warnings_text
+
+
+def validate_and_display_calibration_ranges(
     range_mins: Dict[str, float],
     range_maxes: Dict[str, float],
     motors: Dict[str, Any],
 ) -> None:
     """
     Validate recorded calibration ranges and display red alerts for invalid joints.
-
-    Invalid ranges:
-    - Full range (0-4095): Not physically possible
-    - Min equals max (0-0 or 4095-4095): Invalid, no range recorded
+    
+    Convenience function that combines validate_calibration_ranges and format_calibration_warnings.
 
     Args:
         range_mins: Dictionary mapping motor names to minimum recorded positions
         range_maxes: Dictionary mapping motor names to maximum recorded positions
         motors: Dictionary mapping motor names to Motor objects (must have .id attribute)
     """
-    invalid_joints = []
-    FULL_RANGE_MIN = 0
-    FULL_RANGE_MAX = 4095
-
-    for motor_name in motors.keys():
-        min_val = range_mins.get(motor_name, float("inf"))
-        max_val = range_maxes.get(motor_name, float("-inf"))
-
-        # Skip if values are still inf (no data recorded)
-        if min_val == float("inf") or max_val == float("-inf"):
-            continue
-
-        # Check for invalid ranges
-        is_full_range = min_val == FULL_RANGE_MIN and max_val == FULL_RANGE_MAX
-        is_zero_range = min_val == max_val
-
-        if is_full_range or is_zero_range:
-            invalid_joints.append((motor_name, min_val, max_val, is_full_range, is_zero_range))
-
-    # Display alerts if any invalid joints found
+    invalid_joints = validate_calibration_ranges(range_mins, range_maxes, motors)
+    
     if invalid_joints:
-        print("\n" + "=" * 90)
-        print("\033[91m" + "⚠️  CALIBRATION WARNING: Invalid joint ranges detected" + "\033[0m")
-        print("=" * 90)
-        for motor_name, min_val, max_val, is_full_range, is_zero_range in invalid_joints:
-            motor_id = motors[motor_name].id
-            print(
-                f"\n\033[91m{motor_name:<20} (ID: {motor_id:<3}) - Range: [{min_val:.1f}, {max_val:.1f}]\033[0m"
-            )
-            if is_full_range:
-                print("\033[91m  ❌ Full range (0-4095) detected - not physically possible\033[0m")
-            if is_zero_range:
-                print("\033[91m  ❌ Zero range detected - no motion recorded\033[0m")
-            print("\033[91m  → Action required:\033[0m")
-            print("\033[91m     1. Exit calibration (Ctrl+C)\033[0m")
-            print("\033[91m     2. Unplug power and USB cables from the robot\033[0m")
-            print("\033[91m     3. Wait 5 seconds\033[0m")
-            print("\033[91m     4. Reconnect and retry calibration\033[0m")
-        print("\n" + "=" * 90 + "\n")
+        import sys
+        sys.stdout.flush()
+        warnings_text = format_calibration_warnings(invalid_joints, motors, include_action_required=True)
+        print(warnings_text)
+        sys.stdout.flush()
+
+
 
 
 def ensure_safe_goal_position(
