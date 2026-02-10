@@ -658,10 +658,7 @@ def cyberwave_update_worker(
                             position = raw_offset * (2.0 * math.pi / 4095.0)
                         elif norm_mode == MotorNormMode.RANGE_0_100:
                             # Normalized is in [0, 100], represents percentage of full range
-                            # Center is at 50, so convert to offset from center
-                            center_normalized = 50.0
-                            offset_normalized = normalized_position - center_normalized
-                            raw_offset = (offset_normalized / 100.0) * delta_r
+                            raw_offset = (normalized_position / 100.0) * delta_r
                             position = raw_offset * (2.0 * math.pi / 4095.0)
                         else:  # DEGREES
                             # Already in degrees, convert to radians
