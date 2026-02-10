@@ -668,7 +668,12 @@ def _motor_writer_worker(
                 # If max_relative_target is set, split large movements into smaller steps
                 if follower.config.max_relative_target is not None:
                     # Get initial current positions (only once, at the start)
+                    # get_observation() handles SerialException internally and returns last known positions
                     present_pos = follower.get_observation()
+                    # Handle empty dict gracefully (shouldn't happen, but be safe)
+                    if not present_pos:
+                        # Skip this action if we can't get current positions
+                        continue
                     current_pos = {
                         key.removesuffix(".pos"): val for key, val in present_pos.items()
                     }
@@ -985,10 +990,11 @@ def remoteoperate(
     # Initialize current state with follower's current observation
     current_state: Dict[str, float] = {}
     try:
+        # get_observation() handles SerialException internally and returns last known positions
         initial_obs = follower.get_observation()
         current_state.update(initial_obs)
     except Exception:
-        # Initialize with empty state
+        # Initialize with empty state if get_observation() fails for other reasons
         for name in follower.motors.keys():
             current_state[f"{name}.pos"] = 0.0
 
@@ -1014,6 +1020,7 @@ def remoteoperate(
     # Send initial observation to Cyberwave using publish_initial_observation
     try:
         # Get follower's current observation (normalized positions)
+        # get_observation() handles SerialException internally and returns last known positions
         follower_obs = follower.get_observation()
 
         # Convert to joint index format for initial observation
