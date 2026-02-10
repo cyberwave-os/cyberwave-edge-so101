@@ -81,27 +81,34 @@ This will interactively help you identify the serial port of your SO101 device.
 ### 2. Read Device Data
 
 ```bash
-so101-read-device --port /dev/tty.usbmodem123
+so101-read-device --port /dev/ttyACM0
 ```
 
 Or in continuous mode:
 
 ```bash
-so101-read-device --port /dev/tty.usbmodem123 --continuous
+so101-read-device --port /dev/ttyACM0 --continuous
 ```
 
 ### 3. Calibrate Device
 
-Calibrate a leader device:
+Calibrate a leader device (ID defaults to `leader1` if not specified):
 
 ```bash
-so101-calibrate --type leader --port /dev/tty.usbmodem123 --id leader1
+so101-calibrate --type leader --port /dev/ttyACM0
 ```
 
-Calibrate a follower device:
+Calibrate a follower device (ID defaults to `follower1` if not specified):
 
 ```bash
-so101-calibrate --type follower --port /dev/tty.usbmodem456 --id follower1
+so101-calibrate --type follower --port /dev/ttyACM1
+```
+
+Or specify a custom ID:
+
+```bash
+so101-calibrate --type leader --port /dev/ttyACM0 --id blue
+so101-calibrate --type follower --port /dev/ttyACM1 --id red
 ```
 
 ### 4. Teleoperate with Cyberwave
@@ -110,14 +117,14 @@ so101-calibrate --type follower --port /dev/tty.usbmodem456 --id follower1
 # Basic teleoperation with default camera
 so101-teleoperate \
     --twin-uuid YOUR_TWIN_UUID \
-    --leader-port /dev/tty.usbmodem123 \
-    --follower-port /dev/tty.usbmodem456 \
+    --leader-port /dev/ttyACM0 \
+    --follower-port /dev/ttyACM1 \
     --fps 30
 
 # With camera configuration file
 so101-teleoperate \
     --twin-uuid YOUR_TWIN_UUID \
-    --leader-port /dev/tty.usbmodem123 \
+    --leader-port /dev/ttyACM0 \
     --camera-config camera_config.json
 ```
 
@@ -147,43 +154,51 @@ Read and display comprehensive data from SO101 motors.
 
 ```bash
 # Single read
-so101-read-device --port /dev/tty.usbmodem123
+so101-read-device --port /dev/ttyACM0
 
 # Continuous mode (updates every second)
-so101-read-device --port /dev/tty.usbmodem123 --continuous
+so101-read-device --port /dev/ttyACM0 --continuous
 
 # Read specific motors
-so101-read-device --port /dev/tty.usbmodem123 --motor-ids 1 2 3
+so101-read-device --port /dev/ttyACM0 --motor-ids 1 2 3
 
 # Show raw register values
-so101-read-device --port /dev/tty.usbmodem123 --show-raw
+so101-read-device --port /dev/ttyACM0 --show-raw
 ```
 
 ### `so101-calibrate`
 
 Calibrate SO101 leader or follower devices.
 
-```bash
-# Basic calibration
-so101-calibrate --type leader --port /dev/tty.usbmodem123 --id leader1
+**Note:** The `--id` argument is optional. If not provided, it defaults to `{type}1` (e.g., `leader1` for `--type leader`, `follower1` for `--type follower`).
 
-# With interactive port finding
-so101-calibrate --type leader --find-port --id leader1
+```bash
+# Basic calibration (ID defaults to leader1)
+so101-calibrate --type leader --port /dev/ttyACM0
+
+# With interactive port finding (ID defaults to leader1)
+so101-calibrate --type leader --find-port
+
+# Custom ID
+so101-calibrate --type leader --port /dev/ttyACM0 --id blue
 
 # Custom calibration directory
-so101-calibrate --type leader --port /dev/tty.usbmodem123 --id leader1 \
+so101-calibrate --type leader --port /dev/ttyACM0 \
     --calibration-dir ~/my_calibrations
 
 # Specify voltage rating (5V or 12V)
-so101-calibrate --type leader --port /dev/tty.usbmodem123 --id leader1 --voltage-rating 5
+so101-calibrate --type leader --port /dev/ttyACM0 --voltage-rating 5
+
+# Follower calibration (ID defaults to follower1)
+so101-calibrate --type follower --port /dev/ttyACM1
 ```
 
 **Calibration Process:**
 
 1. Move the device to the zero pose (starting position) as shown in the image below:
-   
+
    ![SO101 Zero Pose](so101-zero-pose.png)
-   
+
    This is the recommended starting position for calibration, with all joints in a well-defined configuration.
 
 2. Press ENTER to set homing offsets
@@ -204,15 +219,15 @@ export CYBERWAVE_TOKEN=your_token_here
 # Basic teleoperation with CV2 USB camera
 so101-teleoperate \
     --twin-uuid YOUR_TWIN_UUID \
-    --leader-port /dev/tty.usbmodem123 \
+    --leader-port /dev/ttyACM0 \
     --fps 30 \
     --camera-fps 30
 
 # Use RealSense camera with depth streaming
 so101-teleoperate \
     --twin-uuid YOUR_TWIN_UUID \
-    --leader-port /dev/tty.usbmodem123 \
-    --follower-port /dev/tty.usbmodem456 \
+    --leader-port /dev/ttyACM0 \
+    --follower-port /dev/ttyACM1 \
     --camera-type realsense \
     --camera-resolution HD \
     --enable-depth \
@@ -221,20 +236,20 @@ so101-teleoperate \
 # Use IP camera / RTSP stream
 so101-teleoperate \
     --twin-uuid YOUR_TWIN_UUID \
-    --leader-port /dev/tty.usbmodem123 \
+    --leader-port /dev/ttyACM0 \
     --camera-id "rtsp://192.168.1.100:554/stream" \
     --camera-resolution VGA
 
 # Use camera configuration file
 so101-teleoperate \
     --twin-uuid YOUR_TWIN_UUID \
-    --leader-port /dev/tty.usbmodem123 \
+    --leader-port /dev/ttyACM0 \
     --camera-config camera_config.json
 
 # Camera-only mode (no teleoperation, just streaming)
 so101-teleoperate \
     --twin-uuid YOUR_TWIN_UUID \
-    --follower-port /dev/tty.usbmodem456 \
+    --follower-port /dev/ttyACM1 \
     --camera-only \
     --camera-config camera_config.json
 ```
@@ -330,7 +345,7 @@ so101-teleoperate --list-realsense
 # Use config file instead of CLI arguments
 so101-teleoperate \
     --twin-uuid YOUR_TWIN_UUID \
-    --leader-port /dev/tty.usbmodem123 \
+    --leader-port /dev/ttyACM0 \
     --camera-config camera_config.json
 ```
 
@@ -346,13 +361,13 @@ Run remote operation loop: receive joint states via MQTT and write to follower m
 # Basic remote operation with CV2 camera
 so101-remoteoperate \
     --twin-uuid YOUR_TWIN_UUID \
-    --follower-port /dev/tty.usbmodem456 \
+    --follower-port /dev/ttyACM1 \
     --camera-fps 30
 
 # Use RealSense camera with depth
 so101-remoteoperate \
     --twin-uuid YOUR_TWIN_UUID \
-    --follower-port /dev/tty.usbmodem456 \
+    --follower-port /dev/ttyACM1 \
     --camera-type realsense \
     --enable-depth \
     --camera-resolution HD
@@ -360,7 +375,7 @@ so101-remoteoperate \
 # Use camera configuration file
 so101-remoteoperate \
     --twin-uuid YOUR_TWIN_UUID \
-    --follower-port /dev/tty.usbmodem456 \
+    --follower-port /dev/ttyACM1 \
     --camera-config camera_config.json
 ```
 
@@ -391,7 +406,7 @@ from leader import SO101Leader
 from config import LeaderConfig
 
 # Create leader configuration
-config = LeaderConfig(port="/dev/tty.usbmodem123", id="leader1")
+config = LeaderConfig(port="/dev/ttyACM0", id="leader1")
 
 # Initialize and connect
 leader = SO101Leader(config=config)
@@ -415,7 +430,7 @@ leader.disconnect()
 from leader import SO101Leader
 from config import LeaderConfig
 
-config = LeaderConfig(port="/dev/tty.usbmodem123", id="leader1")
+config = LeaderConfig(port="/dev/ttyACM0", id="leader1")
 leader = SO101Leader(config=config)
 leader.connect()
 
@@ -441,12 +456,12 @@ robot = cyberwave_client.twin(asset_key="the-robot-studio/so101", twin_id="YOUR_
 camera = cyberwave_client.twin(asset_key="cyberwave/standard-cam", twin_id="YOUR_TWIN_UUID", name="camera")
 
 # Initialize leader
-leader_config = LeaderConfig(port="/dev/tty.usbmodem123", id="leader1")
+leader_config = LeaderConfig(port="/dev/ttyACM0", id="leader1")
 leader = SO101Leader(config=leader_config)
 leader.connect()
 
 # Optionally initialize follower
-follower_config = FollowerConfig(port="/dev/tty.usbmodem456", id="follower1")
+follower_config = FollowerConfig(port="/dev/ttyACM1", id="follower1")
 follower = SO101Follower(config=follower_config)
 follower.connect()
 
@@ -510,7 +525,7 @@ robot = cyberwave_client.twin(asset_key="the-robot-studio/so101", twin_id="YOUR_
 camera = cyberwave_client.twin(asset_key="cyberwave/standard-cam", twin_id="YOUR_TWIN_UUID", name="camera")
 
 # Initialize follower
-follower_config = FollowerConfig(port="/dev/tty.usbmodem456", id="follower1")
+follower_config = FollowerConfig(port="/dev/ttyACM1", id="follower1")
 follower = SO101Follower(config=follower_config)
 follower.connect()
 
@@ -602,7 +617,6 @@ Where:
 ### Core Components
 
 - **`motors/`**: Motor bus layer and data models
-
   - `bus.py`: Abstract base class for motor buses
   - `feetech_bus.py`: Feetech STS3215 implementation
   - `models.py`: Motor and calibration data models
@@ -637,7 +651,7 @@ By default, all motors use `RANGE_M100_100` normalization except `gripper` which
 from config import LeaderConfig
 
 config = LeaderConfig(
-    port="/dev/tty.usbmodem123",  # Serial port
+    port="/dev/ttyACM0",  # Serial port
     use_degrees=True,              # Use degrees (deprecated, use norm_mode instead)
     id="leader1",                  # Device identifier
     calibration_dir=None,          # Custom calibration directory (default: ~/.so101_lib/calibrations)
@@ -651,7 +665,7 @@ config = LeaderConfig(
 from config import FollowerConfig
 
 config = FollowerConfig(
-    port="/dev/tty.usbmodem456",
+    port="/dev/ttyACM1",
     use_degrees=True,
     id="follower1",
     calibration_dir=None,
@@ -684,8 +698,10 @@ RuntimeError: No calibration file found at ...
 Run calibration first:
 
 ```bash
-so101-calibrate --type leader --port /dev/tty.usbmodem123 --id leader1
+so101-calibrate --type leader --port /dev/ttyACM0
 ```
+
+(Note: `--id` is optional and defaults to `leader1` for `--type leader`)
 
 ### Environment Variables Not Set
 
@@ -708,8 +724,10 @@ Get your token from [https://cyberwave.com/profile](https://cyberwave.com/profil
 The library can auto-detect voltage rating (5V or 12V) from motor registers. If detection fails, you can specify it manually:
 
 ```bash
-so101-calibrate --type leader --port /dev/tty.usbmodem123 --id leader1 --voltage-rating 5
+so101-calibrate --type leader --port /dev/ttyACM0 --voltage-rating 5
 ```
+
+(Note: `--id` is optional and defaults to `leader1` for `--type leader`)
 
 ### Connection Issues
 
