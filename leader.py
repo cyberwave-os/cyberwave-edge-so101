@@ -14,7 +14,7 @@ from motors import (
     MotorNormMode,
 )
 from motors.tables import MODE_POSITION
-from utils import load_calibration, save_calibration
+from utils import load_calibration, save_calibration, validate_calibration_ranges
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +224,9 @@ class SO101Leader:
         )
         range_mins, range_maxes = self.bus.record_ranges_of_motion()
 
+        # Validate ranges and display alerts for invalid joints
+        validate_calibration_ranges(range_mins, range_maxes, self.motors)
+
         self.calibration = {}
         for motor_name, motor in self.motors.items():
             self.calibration[motor_name] = MotorCalibration(
@@ -269,4 +272,56 @@ class SO101Leader:
         """Save current calibration to file."""
         self._save_calibration()
         logger.info(f"Calibration saved to {self.calibration_fpath}")
+
+    def _validate_and_alert_ranges(
+        self, range_mins: Dict[str, float], range_maxes: Dict[str, float]
+    ) -> None:
+        """
+        Validate recorded ranges and display red alerts for invalid joints.
+
+        Invalid ranges:
+        - Full range (0-4095): Not physically possible
+        - Min equals max (0-0 or 4095-4095): Invalid, no range recorded
+
+        Args:
+            range_mins: Dictionary mapping motor names to minimum recorded positions
+            range_maxes: Dictionary mapping motor names to maximum recorded positions
+        """
+        invalid_joints = []
+        FULL_RANGE_MIN = 0
+        FULL_RANGE_MAX = 4095
+
+        for motor_name in self.motors.keys():
+            min_val = range_mins.get(motor_name, float("inf"))
+            max_val = range_maxes.get(motor_name, float("-inf"))
+
+            # Skip if values are still inf (no data recorded)
+            if min_val == float("inf") or max_val == float("-inf"):
+                continue
+
+            # Check for invalid ranges
+            is_full_range = min_val == FULL_RANGE_MIN and max_val == FULL_RANGE_MAX
+            is_zero_range = min_val == max_val
+
+            if is_full_range or is_zero_range:
+                invalid_joints.append((motor_name, min_val, max_val, is_full_range, is_zero_range))
+
+        # Display alerts if any invalid joints found
+        if invalid_joints:
+            print("\n" + "=" * 90)
+            print("\033[91m" + "⚠️  CALIBRATION WARNING: Invalid joint ranges detected" + "\033[0m")
+            print("=" * 90)
+            for motor_name, min_val, max_val, is_full_range, is_zero_range in invalid_joints:
+                motor_id = self.motors[motor_name].id
+                print(f"\n\033[91m{motor_name:<20} (ID: {motor_id:<3}) - Range: [{min_val:.1f}, {max_val:.1f}]\033[0m")
+                if is_full_range:
+                    print("\033[91m  ❌ Full range (0-4095) detected - not physically possible\033[0m")
+                if is_zero_range:
+                    print("\033[91m  ❌ Zero range detected - no motion recorded\033[0m")
+                print("\033[91m  → Action required:\033[0m")
+                print("\033[91m     1. Exit calibration (Ctrl+C)\033[0m")
+                print("\033[91m     2. Unplug power and USB cables from the robot\033[0m")
+                print("\033[91m     3. Wait 5 seconds\033[0m")
+                print("\033[91m     4. Reconnect and retry calibration\033[0m")
+            print("\n" + "=" * 90 + "\n")
 
