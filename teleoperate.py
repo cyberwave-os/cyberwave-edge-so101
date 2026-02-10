@@ -639,44 +639,26 @@ def cyberwave_update_worker(
                     timestamp = action_data.get("timestamp")  # Extract timestamp from action_data
 
                     # Convert normalized position to radians using follower calibration
-                    # This ensures proper physical limits (max ~180 degrees from center)
-                    if follower_calibration and joint_name in follower_calibration:
-                        calib = follower_calibration[joint_name]
-                        r_min = calib.range_min
-                        r_max = calib.range_max
-                        delta_r = (r_max - r_min) / 2.0
+                    calib = follower_calibration[joint_name]
+                    r_min = calib.range_min
+                    r_max = calib.range_max
+                    delta_r = (r_max - r_min) / 2.0
 
-                        # Get normalization mode for this joint
-                        norm_mode = joint_name_to_norm_mode.get(joint_name, MotorNormMode.RANGE_M100_100)
+                    # Get normalization mode for this joint
+                    norm_mode = joint_name_to_norm_mode.get(joint_name, MotorNormMode.RANGE_M100_100)
 
-                        # Convert normalized -> radians using calibration ranges
-                        # Normalized value represents percentage of calibrated range
-                        if norm_mode == MotorNormMode.RANGE_M100_100:
-                            # Normalized is in [-100, 100], represents percentage of half-range
-                            # Convert to raw offset from center, then to radians
+                    # Convert normalized -> radians using calibration ranges
+                    # Normalized value represents percentage of calibrated range
+                    match norm_mode:
+                        case MotorNormMode.RANGE_M100_100:
                             raw_offset = (normalized_position / 100.0) * delta_r
                             position = raw_offset * (2.0 * math.pi / 4095.0)
-                        elif norm_mode == MotorNormMode.RANGE_0_100:
-                            # Normalized is in [0, 100], full joint range
+                        case MotorNormMode.RANGE_0_100:
                             delta_r = r_max - r_min
                             raw_value = r_min + (normalized_position / 100.0) * delta_r
-                            # Convert to radians relative to 0 at r_min
                             position = (raw_value - r_min) * (2.0 * math.pi / 4095.0)
-                        else:  # DEGREES
-                            # Already in degrees, convert to radians
+                        case _:
                             position = normalized_position * math.pi / 180.0
-                    else:
-                        # Fallback: use old conversion if no calibration available
-                        norm_mode = joint_name_to_norm_mode.get(joint_name, MotorNormMode.RANGE_M100_100)
-                        match norm_mode:
-                            case MotorNormMode.DEGREES:
-                                position = normalized_position * math.pi / 180.0
-                            case MotorNormMode.RANGE_M100_100:
-                                position_degrees = (normalized_position / 100.0) * 180.0
-                                position = position_degrees * math.pi / 180.0
-                            case MotorNormMode.RANGE_0_100:
-                                position_degrees = (normalized_position / 100.0) * 360.0
-                                position = position_degrees * math.pi / 180.0
                     
                     # Hardcode velocity and effort to 0.0 to avoid issues
                     velocity = 0.0
@@ -1294,6 +1276,12 @@ def teleoperate(
     follower_calibration = None
     if follower is not None and follower.calibration is not None:
         follower_calibration = follower.calibration
+        assert follower_calibration.keys() == follower.motors.keys()
+        for joint_name, calibration in follower_calibration.items():
+            assert joint_name in follower.motors
+            assert calibration.range_min is not None
+            assert calibration.range_max is not None
+            assert calibration.range_min < calibration.range_max
 
     # Start MQTT update worker thread
     worker_thread = None
