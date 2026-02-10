@@ -657,10 +657,11 @@ def cyberwave_update_worker(
                             raw_offset = (normalized_position / 100.0) * delta_r
                             position = raw_offset * (2.0 * math.pi / 4095.0)
                         elif norm_mode == MotorNormMode.RANGE_0_100:
-                            # Normalized is in [0, 100], represents percentage of full range
-                            delta_r = (r_max - r_min)
+                            delta_r = r_max - r_min
                             raw_value = r_min + (normalized_position / 100.0) * delta_r
-                            position = raw_value * math.pi / 4095.0
+                            r_mid = (r_max + r_min) / 2.0
+                            # Convert to radians relative to joint center
+                            position = (raw_value - r_mid) * (2.0 * math.pi / 4095.0)
                         else:  # DEGREES
                             # Already in degrees, convert to radians
                             position = normalized_position * math.pi / 180.0
