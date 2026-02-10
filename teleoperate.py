@@ -660,7 +660,7 @@ def cyberwave_update_worker(
                             # Normalized is in [0, 100], represents percentage of full range
                             delta_r = (r_max - r_min)
                             raw_value = r_min + (normalized_position / 100.0) * delta_r
-                            position = raw_value * (2.0 * math.pi / 4095.0)
+                            position = raw_value * math.pi / 4095.0
                         else:  # DEGREES
                             # Already in degrees, convert to radians
                             position = normalized_position * math.pi / 180.0
