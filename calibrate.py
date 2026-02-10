@@ -63,8 +63,8 @@ Examples:
     parser.add_argument(
         "--id",
         type=str,
-        default="device1",
-        help="Device identifier for calibration file management (default: device1)",
+        default=None,
+        help="Device identifier for calibration file management (default: {type}1, e.g., leader1 or follower1)",
     )
     parser.add_argument(
         "--calibration-dir",
@@ -124,13 +124,16 @@ Examples:
         calibration_dir = Path(args.calibration_dir).expanduser().resolve()
         calibration_dir.mkdir(parents=True, exist_ok=True)
 
+    # Set default ID based on type if not provided
+    device_id = args.id if args.id is not None else f"{args.type}1"
+
     try:
         # Create device instance
         if args.type == "leader":
             config = LeaderConfig(
                 port=port,
                 use_degrees=args.use_degrees,
-                id=args.id,
+                id=device_id,
                 calibration_dir=calibration_dir,
                 voltage_rating=args.voltage_rating,
             )
@@ -144,7 +147,7 @@ Examples:
             config = FollowerConfig(
                 port=port,
                 use_degrees=args.use_degrees,
-                id=args.id,
+                id=device_id,
                 calibration_dir=calibration_dir,
                 voltage_rating=args.voltage_rating,
             )
@@ -155,22 +158,33 @@ Examples:
                 calibration_dir=config.calibration_dir,
             )
 
-        logger.info(f"Calibrating {args.type} device '{args.id}' on port {port}")
+        logger.info(f"Calibrating {args.type} device '{device_id}' on port {port}")
         logger.info(f"Calibration directory: {config.calibration_dir}")
+
+        # Check if calibration file already exists
+        calibration_path = config.calibration_dir / f"{device_id}.json"
+        already_calibrated = calibration_path.exists()
 
         # Connect to device
         logger.info("Connecting to device...")
         device.connect(calibrate=False)
         logger.info("Device connected successfully")
 
-        # Perform calibration
-        logger.info("Starting calibration...")
-        device.calibrate()
+        if args.type == "leader" or (args.type == "follower" and already_calibrated):
+            # Perform calibration (will re-calibrate if already calibrated)
+            logger.info("Starting calibration...")
+            device.calibrate()
 
-        # Save calibration
-        logger.info("Saving calibration...")
-        device.save_calibration()
-        logger.info(f"Calibration saved to {config.calibration_dir / f'{args.id}.json'}")
+            # Save calibration
+            logger.info("Saving calibration...")
+            device.save_calibration()
+            logger.info(f"Calibration saved to {calibration_path}")
+        else:
+            # Follower that wasn't calibrated: connect() already calibrated and saved
+            # Just ensure it's saved (redundant but safe)
+            logger.info("Calibration completed during connection")
+            device.save_calibration()
+            logger.info(f"Calibration saved to {calibration_path}")
 
         # Disconnect
         logger.info("Disconnecting from device...")
