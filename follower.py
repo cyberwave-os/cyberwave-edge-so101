@@ -1,6 +1,7 @@
 """SO101 Follower class for teleoperation."""
 
 import logging
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 from cyberwave import camera
@@ -324,6 +325,12 @@ class SO101Follower:
 
         for motor_name in self.motors:
             self.bus.write("Operating_Mode", motor_name, MODE_POSITION)
+
+        # Reset homing offsets to 0 to ensure we read true raw positions
+        # This ensures consistent readings across calibration runs
+        logger.info("Resetting homing offsets to ensure consistent readings...")
+        self.bus.reset_homing_offsets()
+        time.sleep(0.1)  # Brief delay for offsets to take effect
 
         print(f"\nMove {self} to the middle of its range of motion.")
         print("Current positions:")
