@@ -583,6 +583,7 @@ def cyberwave_update_worker(
     twin: Optional[Twin] = None,
     time_reference: TimeReference = None,
     status_tracker: Optional[StatusTracker] = None,
+    follower_calibration: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Worker thread that processes actions from the queue and updates Cyberwave twin.
@@ -637,31 +638,47 @@ def cyberwave_update_worker(
                     normalized_position = action_data.get("position", 0.0)
                     timestamp = action_data.get("timestamp")  # Extract timestamp from action_data
 
-                    # Get normalization mode for this joint
-                    norm_mode = joint_name_to_norm_mode.get(joint_name, MotorNormMode.DEGREES)
+                    # Convert normalized position to radians using follower calibration
+                    # This ensures proper physical limits (max ~180 degrees from center)
+                    if follower_calibration and joint_name in follower_calibration:
+                        calib = follower_calibration[joint_name]
+                        r_min = calib.range_min
+                        r_max = calib.range_max
+                        delta_r = (r_max - r_min) / 2.0
 
-                    # Convert normalized position to radians for Cyberwave
-                    # The position is already normalized, so we need to convert it to radians
-                    # based on the normalization mode (always converts to radians)
-                    if norm_mode == MotorNormMode.DEGREES:
-                        # Already in degrees, convert to radians
-                        position = normalized_position * math.pi / 180.0
-                    elif norm_mode == MotorNormMode.RANGE_M100_100:
-                        # Convert from -100 to 100 range to degrees, then to radians
-                        position_degrees = (
-                            normalized_position / 100.0
-                        ) * 180.0  # -100 to 100 -> -180 to 180 degrees
-                        position = position_degrees * math.pi / 180.0
-                    elif norm_mode == MotorNormMode.RANGE_0_100:
-                        # Convert from 0 to 100 range to degrees, then to radians
-                        position_degrees = (
-                            normalized_position / 100.0
-                        ) * 360.0  # 0 to 100 -> 0 to 360 degrees
-                        position = position_degrees * math.pi / 180.0
+                        # Get normalization mode for this joint
+                        norm_mode = joint_name_to_norm_mode.get(joint_name, MotorNormMode.RANGE_M100_100)
+
+                        # Convert normalized -> radians using calibration ranges
+                        # Normalized value represents percentage of calibrated range
+                        if norm_mode == MotorNormMode.RANGE_M100_100:
+                            # Normalized is in [-100, 100], represents percentage of half-range
+                            # Convert to raw offset from center, then to radians
+                            raw_offset = (normalized_position / 100.0) * delta_r
+                            position = raw_offset * (2.0 * math.pi / 4095.0)
+                        elif norm_mode == MotorNormMode.RANGE_0_100:
+                            # Normalized is in [0, 100], represents percentage of full range
+                            # Center is at 50, so convert to offset from center
+                            center_normalized = 50.0
+                            offset_normalized = normalized_position - center_normalized
+                            raw_offset = (offset_normalized / 100.0) * delta_r
+                            position = raw_offset * (2.0 * math.pi / 4095.0)
+                        else:  # DEGREES
+                            # Already in degrees, convert to radians
+                            position = normalized_position * math.pi / 180.0
                     else:
-                        # Default: assume degrees and convert to radians
-                        position = normalized_position * math.pi / 180.0
-
+                        # Fallback: use old conversion if no calibration available
+                        norm_mode = joint_name_to_norm_mode.get(joint_name, MotorNormMode.RANGE_M100_100)
+                        match norm_mode:
+                            case MotorNormMode.DEGREES:
+                                position = normalized_position * math.pi / 180.0
+                            case MotorNormMode.RANGE_M100_100:
+                                position_degrees = (normalized_position / 100.0) * 180.0
+                                position = position_degrees * math.pi / 180.0
+                            case MotorNormMode.RANGE_0_100:
+                                position_degrees = (normalized_position / 100.0) * 360.0
+                                position = position_degrees * math.pi / 180.0
+                    
                     # Hardcode velocity and effort to 0.0 to avoid issues
                     velocity = 0.0
                     effort = 0.0
@@ -1274,6 +1291,11 @@ def teleoperate(
     )
     status_thread.start()
 
+    # Get follower calibration for proper conversion to radians
+    follower_calibration = None
+    if follower is not None and follower.calibration is not None:
+        follower_calibration = follower.calibration
+
     # Start MQTT update worker thread
     worker_thread = None
     if robot is not None:
@@ -1287,6 +1309,7 @@ def teleoperate(
                 robot,
                 time_reference,
                 status_tracker,
+                follower_calibration,
             ),
             daemon=True,
         )
@@ -1353,16 +1376,37 @@ def teleoperate(
                 name = joint_key.removesuffix(".pos")
                 if name in follower.motors:
                     joint_index = follower.motors[name].id
-                    # Convert normalized position to radians for Cyberwave
-                    norm_mode = joint_name_to_norm_mode[name]
-                    if norm_mode == MotorNormMode.RANGE_M100_100:
-                        degrees = (normalized_pos / 100.0) * 180.0
-                        radians = degrees * math.pi / 180.0
-                    elif norm_mode == MotorNormMode.RANGE_0_100:
-                        degrees = (normalized_pos / 100.0) * 360.0
-                        radians = degrees * math.pi / 180.0
+                    # Convert normalized position to radians using calibration
+                    if follower_calibration and name in follower_calibration:
+                        calib = follower_calibration[name]
+                        r_min = calib.range_min
+                        r_max = calib.range_max
+                        delta_r = (r_max - r_min) / 2.0
+                        
+                        norm_mode = joint_name_to_norm_mode[name]
+                        if norm_mode == MotorNormMode.RANGE_M100_100:
+                            # Normalized is in [-100, 100], convert to radians
+                            raw_offset = (normalized_pos / 100.0) * delta_r
+                            radians = raw_offset * (2.0 * math.pi / 4095.0)
+                        elif norm_mode == MotorNormMode.RANGE_0_100:
+                            # Normalized is in [0, 100], center at 50
+                            center_normalized = 50.0
+                            offset_normalized = normalized_pos - center_normalized
+                            raw_offset = (offset_normalized / 100.0) * delta_r
+                            radians = raw_offset * (2.0 * math.pi / 4095.0)
+                        else:  # DEGREES
+                            radians = normalized_pos * math.pi / 180.0
                     else:
-                        radians = normalized_pos * math.pi / 180.0  # Assume degrees
+                        # Fallback if no calibration
+                        norm_mode = joint_name_to_norm_mode[name]
+                        if norm_mode == MotorNormMode.RANGE_M100_100:
+                            degrees = (normalized_pos / 100.0) * 180.0
+                            radians = degrees * math.pi / 180.0
+                        elif norm_mode == MotorNormMode.RANGE_0_100:
+                            degrees = (normalized_pos / 100.0) * 360.0
+                            radians = degrees * math.pi / 180.0
+                        else:
+                            radians = normalized_pos * math.pi / 180.0
                     observations[joint_index] = radians
             # Send follower observations to Cyberwave as single update
             mqtt_client.publish_initial_observation(

@@ -9,27 +9,16 @@ from config import LeaderConfig
 from errors import DeviceNotConnectedError
 from motors import (
     FeetechMotorsBus,
-    Motor,
     MotorCalibration,
-    MotorNormMode,
 )
 from motors.tables import MODE_POSITION
+from robot import SO101Robot
 from utils import load_calibration, save_calibration
 
 logger = logging.getLogger(__name__)
 
-# SO101 Leader motor configuration
-SO101_LEADER_MOTORS = {
-    "shoulder_pan": Motor(id=1, model="STS3215", norm_mode=MotorNormMode.RANGE_M100_100),
-    "shoulder_lift": Motor(id=2, model="STS3215", norm_mode=MotorNormMode.RANGE_M100_100),
-    "elbow_flex": Motor(id=3, model="STS3215", norm_mode=MotorNormMode.RANGE_M100_100),
-    "wrist_flex": Motor(id=4, model="STS3215", norm_mode=MotorNormMode.RANGE_M100_100),
-    "wrist_roll": Motor(id=5, model="STS3215", norm_mode=MotorNormMode.RANGE_M100_100),
-    "gripper": Motor(id=6, model="STS3215", norm_mode=MotorNormMode.RANGE_0_100),
-}
 
-
-class SO101Leader:
+class SO101Leader(SO101Robot):
     """SO101 Leader device for teleoperation."""
 
     def __init__(
@@ -50,6 +39,7 @@ class SO101Leader:
             id: Device identifier for calibration file management
             calibration_dir: Directory for calibration files (default: ~/.so101_lib/calibrations)
         """
+        super().__init__()
         if config is not None:
             self.config = config
         else:
@@ -58,11 +48,6 @@ class SO101Leader:
             self.config = LeaderConfig(
                 port=port, use_degrees=use_degrees, id=id, calibration_dir=calibration_dir
             )
-        self.bus: Optional[FeetechMotorsBus] = None
-        self.motors = SO101_LEADER_MOTORS
-        self.calibration: Optional[Dict[str, MotorCalibration]] = None
-        self._connected = False
-        self._torque_enabled = False  # Leader is passive by default
 
     @property
     def connected(self) -> bool:

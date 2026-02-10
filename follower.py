@@ -14,22 +14,13 @@ from motors import (
     MotorNormMode,
 )
 from motors.tables import MODE_POSITION
+from robot import SO101Robot
 from utils import load_calibration, save_calibration
 
 logger = logging.getLogger(__name__)
 
-# SO101 Follower motor configuration (same as leader)
-SO101_FOLLOWER_MOTORS = {
-    "shoulder_pan": Motor(id=1, model="STS3215", norm_mode=MotorNormMode.RANGE_M100_100),
-    "shoulder_lift": Motor(id=2, model="STS3215", norm_mode=MotorNormMode.RANGE_M100_100),
-    "elbow_flex": Motor(id=3, model="STS3215", norm_mode=MotorNormMode.RANGE_M100_100),
-    "wrist_flex": Motor(id=4, model="STS3215", norm_mode=MotorNormMode.RANGE_M100_100),
-    "wrist_roll": Motor(id=5, model="STS3215", norm_mode=MotorNormMode.RANGE_M100_100),
-    "gripper": Motor(id=6, model="STS3215", norm_mode=MotorNormMode.RANGE_0_100),
-}
 
-
-class SO101Follower:
+class SO101Follower(SO101Robot):
     """SO101 Follower device for teleoperation."""
 
     def __init__(
@@ -54,6 +45,7 @@ class SO101Follower:
             max_relative_target: Maximum allowed change from current position (safety limit)
             cameras: Optional list of camera configurations (not implemented yet)
         """
+        super().__init__()
         if config is not None:
             self.config = config
         else:
@@ -72,16 +64,6 @@ class SO101Follower:
         norm_mode_body = (
             MotorNormMode.DEGREES if self.config.use_degrees else MotorNormMode.RANGE_M100_100
         )
-
-        # Create motors dict with appropriate normalization modes
-        self.motors = {
-            "shoulder_pan": Motor(id=1, model="STS3215", norm_mode=norm_mode_body),
-            "shoulder_lift": Motor(id=2, model="STS3215", norm_mode=norm_mode_body),
-            "elbow_flex": Motor(id=3, model="STS3215", norm_mode=norm_mode_body),
-            "wrist_flex": Motor(id=4, model="STS3215", norm_mode=norm_mode_body),
-            "wrist_roll": Motor(id=5, model="STS3215", norm_mode=norm_mode_body),
-            "gripper": Motor(id=6, model="STS3215", norm_mode=MotorNormMode.RANGE_0_100),
-        }
 
         # Initialize bus with motors and calibration
         # Note: calibration may be None initially, will be set after loading
@@ -103,9 +85,7 @@ class SO101Follower:
         else:
             logger.info("No calibration file found - follower will work without calibration")
 
-        self._connected = False
         self._current_positions: Dict[str, float] = {}
-        self._torque_enabled = False
 
     def __str__(self) -> str:
         """String representation of the follower."""

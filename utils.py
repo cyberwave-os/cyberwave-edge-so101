@@ -86,13 +86,15 @@ def validate_calibration_ranges(
         )
         # Zero range: min equals max
         is_zero_range = min_val == max_val
-        
+
         # Check if range span is suspiciously large (close to full 4095 range)
         range_span = max_val - min_val
         is_suspiciously_large = range_span >= FULL_RANGE_MAX - FULL_RANGE_THRESHOLD
 
         if is_full_range or is_zero_range or is_suspiciously_large:
-            invalid_joints.append((motor_name, min_val, max_val, is_full_range, is_zero_range, is_suspiciously_large))
+            invalid_joints.append(
+                (motor_name, min_val, max_val, is_full_range, is_zero_range, is_suspiciously_large)
+            )
 
     return invalid_joints
 
@@ -119,8 +121,15 @@ def format_calibration_warnings(
     warnings_text = "\n\033[91m" + "=" * 90 + "\033[0m\n"
     warnings_text += "\033[91m" + "⚠️  WARNING: Invalid joint ranges detected!" + "\033[0m\n"
     warnings_text += "\033[91m" + "=" * 90 + "\033[0m"
-    
-    for motor_name, min_val, max_val, is_full_range, is_zero_range, is_suspiciously_large in invalid_joints:
+
+    for (
+        motor_name,
+        min_val,
+        max_val,
+        is_full_range,
+        is_zero_range,
+        is_suspiciously_large,
+    ) in invalid_joints:
         motor_id = motors[motor_name].id
         range_span = max_val - min_val
         warnings_text += f"\n\033[91m{motor_name:<20} (ID: {motor_id:<3}) - Range: [{min_val:.1f}, {max_val:.1f}] (span: {range_span:.1f})\033[0m\n"
@@ -130,14 +139,14 @@ def format_calibration_warnings(
             warnings_text += f"\033[91m  ❌ Range span ({range_span:.1f}) is suspiciously large - not physically possible\033[0m\n"
         if is_zero_range:
             warnings_text += "\033[91m  ❌ Zero range detected - no motion recorded\033[0m\n"
-        
+
         if include_action_required:
             warnings_text += "\033[91m  → Action required:\033[0m\n"
             warnings_text += "\033[91m     1. Exit calibration (Ctrl+C)\033[0m\n"
             warnings_text += "\033[91m     2. Unplug power and USB cables from the robot\033[0m\n"
             warnings_text += "\033[91m     3. Wait 5 seconds\033[0m\n"
             warnings_text += "\033[91m     4. Reconnect and retry calibration\033[0m\n"
-    
+
     warnings_text += "\033[91m" + "=" * 90 + "\033[0m\n"
     return warnings_text
 
@@ -149,7 +158,7 @@ def validate_and_display_calibration_ranges(
 ) -> None:
     """
     Validate recorded calibration ranges and display red alerts for invalid joints.
-    
+
     Convenience function that combines validate_calibration_ranges and format_calibration_warnings.
 
     Args:
@@ -158,15 +167,16 @@ def validate_and_display_calibration_ranges(
         motors: Dictionary mapping motor names to Motor objects (must have .id attribute)
     """
     invalid_joints = validate_calibration_ranges(range_mins, range_maxes, motors)
-    
+
     if invalid_joints:
         import sys
+
         sys.stdout.flush()
-        warnings_text = format_calibration_warnings(invalid_joints, motors, include_action_required=True)
+        warnings_text = format_calibration_warnings(
+            invalid_joints, motors, include_action_required=True
+        )
         print(warnings_text)
         sys.stdout.flush()
-
-
 
 
 def ensure_safe_goal_position(
@@ -505,15 +515,8 @@ def convert_position_with_calibration(
 
     calib = calibration_data[joint_name]
 
-    # Handle both old format (dict with raw/degrees/radians) and new format (raw values only)
-    if isinstance(calib.get("range_min"), dict):
-        # Old format with raw/degrees/radians dict - extract raw values
-        range_min_raw = calib["range_min"]["raw"]
-        range_max_raw = calib["range_max"]["raw"]
-    else:
-        # New format (direct raw float values)
-        range_min_raw = calib["range_min"]
-        range_max_raw = calib["range_max"]
+    range_min_raw = calib["range_min"]
+    range_max_raw = calib["range_max"]
 
     # Check for invalid calibration
     if range_max_raw == range_min_raw:
@@ -523,40 +526,32 @@ def convert_position_with_calibration(
     bounded_val = min(range_max_raw, max(range_min_raw, raw_position))
     # logger.info(f"Joint {joint_name}: Bounded value: {bounded_val}, range_min_raw: {range_min_raw}, range_max_raw: {range_max_raw}")
     # Convert based on normalization mode
-    if norm_mode == MotorNormMode.RANGE_M100_100:
-        # Formula: (((bounded_val - min_) / (max_ - min_)) * 200) - 100
-        norm = (((bounded_val - range_min_raw) / (range_max_raw - range_min_raw)) * 200.0) - 100.0
-        # Apply drive_mode inversion (if drive_mode=1, invert sign)
-        position = -norm if drive_mode else norm
-    elif norm_mode == MotorNormMode.RANGE_0_100:
-        # Formula: ((bounded_val - min_) / (max_ - min_)) * 100
-        norm = ((bounded_val - range_min_raw) / (range_max_raw - range_min_raw)) * 100.0
-        # Apply drive_mode inversion (if drive_mode=1, use 100 - norm)
-        position = 100.0 - norm if drive_mode else norm
-    elif norm_mode == MotorNormMode.DEGREES:
-        # Formula: degrees = (raw_encoder_value - mid) * 360 / max_res
-        # where:
-        #   mid = (range_min + range_max) / 2 (center of calibrated range)
-        #   max_res = 4095 (12-bit encoder resolution for STS3215)
-        mid = (range_min_raw + range_max_raw) / 2.0
-        max_res = 4095.0  # 12-bit encoder resolution
-        position_degrees = (bounded_val - mid) * 360.0 / max_res
-        # Convert to radians if requested
-        if use_radians:
-            position = position_degrees * math.pi / 180.0
-        else:
-            position = position_degrees
-    else:
-        # Default to degrees if unknown mode
-        logger.warning(f"Unknown normalization mode {norm_mode}, defaulting to degrees")
-        mid = (range_min_raw + range_max_raw) / 2.0
-        max_res = 4095.0
-        position_degrees = (bounded_val - mid) * 360.0 / max_res
-        if use_radians:
-            position = position_degrees * math.pi / 180.0
-        else:
-            position = position_degrees
-
+    match norm_mode:
+        case MotorNormMode.RANGE_M100_100:
+            # Formula: (((bounded_val - min_) / (max_ - min_)) * 200) - 100
+            norm = (
+                ((bounded_val - range_min_raw) / (range_max_raw - range_min_raw)) * 200.0
+            ) - 100.0
+            # Apply drive_mode inversion (if drive_mode=1, invert sign)
+            position = -norm if drive_mode else norm
+        case MotorNormMode.RANGE_0_100:
+            # Formula: ((bounded_val - min_) / (max_ - min_)) * 100
+            norm = ((bounded_val - range_min_raw) / (range_max_raw - range_min_raw)) * 100.0
+            # Apply drive_mode inversion (if drive_mode=1, use 100 - norm)
+            position = 100.0 - norm if drive_mode else norm
+        case MotorNormMode.DEGREES:
+            # Formula: degrees = (raw_encoder_value - mid) * 360 / max_res
+            # where:
+            #   mid = (range_min + range_max) / 2 (center of calibrated range)
+            #   max_res = 4095 (12-bit encoder resolution for STS3215)
+            mid = (range_min_raw + range_max_raw) / 2.0
+            max_res = 4095.0  # 12-bit encoder resolution
+            position_degrees = (bounded_val - mid) * 360.0 / max_res
+            # Convert to radians if requested
+            if use_radians:
+                position = position_degrees * math.pi / 180.0
+            else:
+                position = position_degrees
     return position
 
 
@@ -587,70 +582,63 @@ def denormalize_position(
 
     calib = calibration_data[joint_name]
 
-    # Handle both old format (dict with raw/degrees/radians) and new format (raw values only)
-    if isinstance(calib.get("range_min"), dict):
-        range_min_raw = calib["range_min"]["raw"]
-        range_max_raw = calib["range_max"]["raw"]
-    else:
-        range_min_raw = calib["range_min"]
-        range_max_raw = calib["range_max"]
+    range_min_raw = calib["range_min"]
+    range_max_raw = calib["range_max"]
 
     # Clamp normalized position to valid range FIRST to prevent wrapping
     # This is critical when leader reaches limits and normalized values might slightly exceed bounds
-    if norm_mode == MotorNormMode.RANGE_M100_100:
-        # Clamp to [-100, 100] BEFORE any processing
-        original_norm = normalized_position
-        normalized_position = max(-100.0, min(100.0, normalized_position))
-        if abs(original_norm - normalized_position) > 1e-6:
-            logger.debug(
-                f"{joint_name}: Clamped normalized position from {original_norm:.6f} to {normalized_position:.6f}"
+    match norm_mode:
+        case MotorNormMode.RANGE_M100_100:
+            # Clamp to [-100, 100] BEFORE any processing
+            original_norm = normalized_position
+            normalized_position = max(-100.0, min(100.0, normalized_position))
+            if abs(original_norm - normalized_position) > 1e-6:
+                logger.debug(
+                    f"{joint_name}: Clamped normalized position from {original_norm:.6f} to {normalized_position:.6f}"
+                )
+            # Inverse of: norm = (((bounded_val - min_) / (max_ - min_)) * 200) - 100
+            # With drive_mode: position = -norm if drive_mode else norm
+            # So: norm = -position if drive_mode else position
+            norm = -normalized_position if drive_mode else normalized_position
+            # Clamp norm to [-100, 100] after drive_mode inversion (safety)
+            norm = max(-100.0, min(100.0, norm))
+            # norm = (((raw - min_) / (max_ - min_)) * 200) - 100
+            # (norm + 100) / 200 = (raw - min_) / (max_ - min_)
+            # raw = min_ + (norm + 100) / 200 * (max_ - min_)
+            raw_position = range_min_raw + ((norm + 100.0) / 200.0) * (
+                range_max_raw - range_min_raw
             )
-        # Inverse of: norm = (((bounded_val - min_) / (max_ - min_)) * 200) - 100
-        # With drive_mode: position = -norm if drive_mode else norm
-        # So: norm = -position if drive_mode else position
-        norm = -normalized_position if drive_mode else normalized_position
-        # Clamp norm to [-100, 100] after drive_mode inversion (safety)
-        norm = max(-100.0, min(100.0, norm))
-        # norm = (((raw - min_) / (max_ - min_)) * 200) - 100
-        # (norm + 100) / 200 = (raw - min_) / (max_ - min_)
-        # raw = min_ + (norm + 100) / 200 * (max_ - min_)
-        raw_position = range_min_raw + ((norm + 100.0) / 200.0) * (range_max_raw - range_min_raw)
-        # Additional safety: clamp to calibrated range immediately (before any other processing)
-        raw_position = max(range_min_raw, min(range_max_raw, raw_position))
-    elif norm_mode == MotorNormMode.RANGE_0_100:
-        # Clamp to [0, 100] BEFORE any processing
-        original_norm = normalized_position
-        normalized_position = max(0.0, min(100.0, normalized_position))
-        if abs(original_norm - normalized_position) > 1e-6:
-            logger.debug(
-                f"{joint_name}: Clamped normalized position from {original_norm:.6f} to {normalized_position:.6f}"
-            )
-        # Inverse of: norm = ((bounded_val - min_) / (max_ - min_)) * 100
-        # With drive_mode: position = 100 - norm if drive_mode else norm
-        # So: norm = 100 - position if drive_mode else position
-        norm = 100.0 - normalized_position if drive_mode else normalized_position
-        # Clamp norm to [0, 100] after drive_mode inversion (safety)
-        norm = max(0.0, min(100.0, norm))
-        # norm = ((raw - min_) / (max_ - min_)) * 100
-        # raw = min_ + (norm / 100) * (max_ - min_)
-        raw_position = range_min_raw + (norm / 100.0) * (range_max_raw - range_min_raw)
-        # Additional safety: clamp to calibrated range immediately (before any other processing)
-        raw_position = max(range_min_raw, min(range_max_raw, raw_position))
-    elif norm_mode == MotorNormMode.DEGREES:
-        # For degrees, we don't have a fixed range, but we should still clamp to reasonable values
-        # Inverse of: degrees = (raw - mid) * 360 / max_res
-        # where mid = (range_min + range_max) / 2
-        # raw = mid + (degrees * max_res) / 360
-        mid = (range_min_raw + range_max_raw) / 2.0
-        max_res = 4095.0
-        raw_position = mid + (normalized_position * max_res) / 360.0
-        # Clamp to calibrated range immediately
-        raw_position = max(range_min_raw, min(range_max_raw, raw_position))
-    else:
-        # Default: assume raw position is already normalized
-        raw_position = normalized_position
-        # Still clamp to calibrated range
-        raw_position = max(range_min_raw, min(range_max_raw, raw_position))
+            # Additional safety: clamp to calibrated range immediately (before any other processing)
+            raw_position = max(range_min_raw, min(range_max_raw, raw_position))
+        case MotorNormMode.RANGE_0_100:
+            # Clamp to [0, 100] BEFORE any processing
+            original_norm = normalized_position
+            normalized_position = max(0.0, min(100.0, normalized_position))
+            if abs(original_norm - normalized_position) > 1e-6:
+                logger.debug(
+                    f"{joint_name}: Clamped normalized position from {original_norm:.6f} to {normalized_position:.6f}"
+                )
+            # Inverse of: norm = ((bounded_val - min_) / (max_ - min_)) * 100
+            # With drive_mode: position = 100 - norm if drive_mode else norm
+            # So: norm = 100 - position if drive_mode else position
+            norm = 100.0 - normalized_position if drive_mode else normalized_position
+            # Clamp norm to [0, 100] after drive_mode inversion (safety)
+            norm = max(0.0, min(100.0, norm))
+            # norm = ((raw - min_) / (max_ - min_)) * 100
+            # raw = min_ + (norm / 100) * (max_ - min_)
+            raw_position = range_min_raw + (norm / 100.0) * (range_max_raw - range_min_raw)
+            # Additional safety: clamp to calibrated range immediately (before any other processing)
+            raw_position = max(range_min_raw, min(range_max_raw, raw_position))
+        case MotorNormMode.DEGREES:
+            # For degrees, we don't have a fixed range, but we should still clamp to reasonable values
+            # Inverse of: degrees = (raw - mid) * 360 / max_res
+            # where mid = (range_min + range_max) / 2
+            # raw = mid + (degrees * max_res) / 360
+            mid = (range_min_raw + range_max_raw) / 2.0
+            max_res = 4095.0
+            raw_position = mid + (normalized_position * max_res) / 360.0
+            # Clamp to calibrated range immediately
+            raw_position = max(range_min_raw, min(range_max_raw, raw_position))
 
     # Final safety clamp: ensure within physical encoder range (0-4095)
     # This is the LAST line of defense against wrapping
