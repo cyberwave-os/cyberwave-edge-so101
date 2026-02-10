@@ -10,6 +10,7 @@ from motors import (
     FeetechMotorsBus,
     MotorCalibration,
 )
+from motors.tables import MODE_POSITION
 from robot import SO101Robot
 from utils import load_calibration
 
