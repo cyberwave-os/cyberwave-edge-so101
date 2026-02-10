@@ -60,11 +60,6 @@ class SO101Follower(SO101Robot):
                 cameras=cameras,
             )
 
-        # Determine normalization mode based on config
-        norm_mode_body = (
-            MotorNormMode.DEGREES if self.config.use_degrees else MotorNormMode.RANGE_M100_100
-        )
-
         # Initialize bus with motors and calibration
         # Note: calibration may be None initially, will be set after loading
         self.bus = FeetechMotorsBus(port=self.config.port, motors=self.motors, calibration=None)
@@ -233,6 +228,15 @@ class SO101Follower(SO101Robot):
         self.bus.sync_write("Goal_Position", goal_pos, normalize=True)
 
         return {f"{motor}.pos": val for motor, val in goal_pos.items()}
+
+    def get_action(self) -> Dict[str, float]:
+        """
+        Get current motor positions as action dictionary.
+
+        Returns:
+            Dictionary mapping motor names (with .pos suffix) to normalized position values
+        """
+        return self.get_observation()
 
     def get_observation(self) -> Dict[str, float]:
         """

@@ -49,6 +49,8 @@ class SO101Leader(SO101Robot):
                 port=port, use_degrees=use_degrees, id=id, calibration_dir=calibration_dir
             )
 
+        self.calibration: Optional[Dict[str, MotorCalibration]] = None
+
     @property
     def connected(self) -> bool:
         """Check if leader is connected."""

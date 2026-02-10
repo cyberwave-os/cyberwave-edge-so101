@@ -30,7 +30,7 @@ class SO101Robot(abc.ABC):
     @abc.abstractmethod
     def __init__(self) -> None:
         """Initialize SO101 Robot."""
-        self.motors: Dict[str, Motor] = {}
+        self.motors: Dict[str, Motor] = SO101_MOTORS
         self.bus: Optional[FeetechMotorsBus] = None
         self.calibration: Optional[Dict[str, MotorCalibration]] = None
         self._connected = False
