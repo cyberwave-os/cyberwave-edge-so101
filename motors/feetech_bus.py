@@ -83,7 +83,9 @@ class FeetechMotorsBus(MotorsBus):
         self._sync_writer = None  # GroupSyncWrite for batch writes
         self.motors = motors or {}
         self.calibration = calibration if calibration else {}
-        self._calibration_starting_positions: Dict[str, float] = {}  # Track starting positions for calibration quality check
+        self._calibration_starting_positions: Dict[
+            str, float
+        ] = {}  # Track starting positions for calibration quality check
 
     @staticmethod
     def _patch_port_handler(port_handler) -> None:
@@ -384,7 +386,9 @@ class FeetechMotorsBus(MotorsBus):
         for motor_id in motor_ids:
             self._sync_reader.addParam(motor_id)
 
-    def sync_read_positions(self, motor_ids: List[int], num_retry: int = 0, use_sequential: bool = False) -> Dict[int, float]:
+    def sync_read_positions(
+        self, motor_ids: List[int], num_retry: int = 0, use_sequential: bool = False
+    ) -> Dict[int, float]:
         """
         Synchronously read positions from multiple motors using batch read.
 
@@ -411,7 +415,7 @@ class FeetechMotorsBus(MotorsBus):
         # Setup sync reader - clear first to avoid cached data
         # Extract address and length from tuple
         addr, length = ADDR_PRESENT_POSITION[0], ADDR_PRESENT_POSITION[1]
-        
+
         # Explicitly clear before setup to ensure no cached data
         self._sync_reader.clearParam()
         self._setup_sync_reader(motor_ids, addr, length)
@@ -790,7 +794,7 @@ class FeetechMotorsBus(MotorsBus):
     def reset_homing_offsets(self) -> None:
         """
         Reset homing offsets to 0 for all motors.
-        
+
         This ensures we read true raw positions without any offset applied.
         Should be called at the start of calibration to ensure consistent readings.
         """
@@ -878,7 +882,7 @@ class FeetechMotorsBus(MotorsBus):
         Check if a motor has been properly calibrated based on range coverage.
 
         Uses the raw positions as displayed in calibration (after homing offset is applied).
-        
+
         For RANGE_M100_100 motors: Checks if range covers ±10% of starting position
         For RANGE_0_100 motors: Checks if range covers +10% of starting position
 
@@ -964,7 +968,9 @@ class FeetechMotorsBus(MotorsBus):
         lines.append("\n" + "=" * 90)
 
         if show_min_max:
-            lines.append(f"{'Motor':<20} {'ID':<5} {'Current':<12} {'Min':<12} {'Max':<12} {'Status':<8}")
+            lines.append(
+                f"{'Motor':<20} {'ID':<5} {'Current':<12} {'Min':<12} {'Max':<12} {'Status':<8}"
+            )
             lines.append("-" * 90)
             lines.append(f"{'':<20} {'':<5} {'Raw':<12} {'Raw':<12} {'Raw':<12} {'':<8}")
         else:

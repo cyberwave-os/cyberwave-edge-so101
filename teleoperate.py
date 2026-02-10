@@ -33,6 +33,7 @@ try:
         RealSenseConfig,
         RealSenseDiscovery,
     )
+
     _has_realsense = True
 except ImportError:
     _has_realsense = False
@@ -191,8 +192,7 @@ class TeleoperateCameraConfig:
         """
         if not _has_realsense:
             raise ImportError(
-                "RealSense support requires pyrealsense2. "
-                "Install with: pip install pyrealsense2"
+                "RealSense support requires pyrealsense2. Install with: pip install pyrealsense2"
             )
 
         # Use SDK's RealSenseConfig.from_device() for auto-detection
@@ -253,10 +253,10 @@ class TeleoperateCameraConfig:
 def _detect_camera_type_from_asset(asset_key: str) -> str:
     """
     Detect camera type from asset key.
-    
+
     Args:
         asset_key: Asset key (e.g., "intel/realsensed455", "cyberwave/standard-cam")
-        
+
     Returns:
         Camera type: "realsense" or "cv2"
     """
@@ -269,10 +269,10 @@ def _detect_camera_type_from_asset(asset_key: str) -> str:
 def _get_default_camera_config(camera_type: str) -> TeleoperateCameraConfig:
     """
     Get default camera configuration based on camera type.
-    
+
     Args:
         camera_type: Camera type ("cv2" or "realsense")
-        
+
     Returns:
         TeleoperateCameraConfig with default settings
     """
@@ -341,7 +341,9 @@ class StatusTracker:
         self.messages_filtered = 0
         self.errors = 0
         self.joint_states: Dict[str, float] = {}
-        self.joint_temperatures: Dict[str, float] = {}  # Format: "leader_1" or "follower_1" -> temperature
+        self.joint_temperatures: Dict[
+            str, float
+        ] = {}  # Format: "leader_1" or "follower_1" -> temperature
         self.joint_index_to_name: Dict[str, str] = {}
         self.robot_uuid: str = ""
         self.robot_name: str = ""
@@ -799,7 +801,7 @@ def _process_cyberwave_updates(
 def _read_temperatures(
     leader: Optional[SO101Leader],
     follower: Optional[SO101Follower],
-    joint_index_to_name: Dict[str, str]
+    joint_index_to_name: Dict[str, str],
 ) -> Dict[str, float]:
     """
     Read temperatures from leader and follower motors.
@@ -813,9 +815,10 @@ def _read_temperatures(
         Dictionary mapping "leader_{motor_id}" or "follower_{motor_id}" to temperature in Celsius
     """
     temperatures = {}
-    
+
     try:
         from motors.tables import ADDR_PRESENT_TEMPERATURE
+
         addr = ADDR_PRESENT_TEMPERATURE[0]  # Temperature is 1 byte
 
         # Read temperatures from leader
@@ -916,7 +919,11 @@ def _status_logging_thread(
             else:
                 webrtc_icon = "🔴"
 
-            lines.append(f"Script:{script_icon} MQTT:{mqtt_icon} Camera:{camera_icon} WebRTC:{webrtc_icon}".ljust(70))
+            lines.append(
+                f"Script:{script_icon} MQTT:{mqtt_icon} Camera:{camera_icon} WebRTC:{webrtc_icon}".ljust(
+                    70
+                )
+            )
             lines.append("-" * 70)
 
             # Statistics
@@ -931,11 +938,13 @@ def _status_logging_thread(
                 for joint_index in sorted(status["joint_states"].keys()):
                     position = status["joint_states"][joint_index]
                     joint_name = index_to_name.get(joint_index, joint_index)
-                    
+
                     # Get temperatures for this motor from both leader and follower
                     leader_temp = status["joint_temperatures"].get(f"leader_{joint_index}", None)
-                    follower_temp = status["joint_temperatures"].get(f"follower_{joint_index}", None)
-                    
+                    follower_temp = status["joint_temperatures"].get(
+                        f"follower_{joint_index}", None
+                    )
+
                     # Build temperature display with indicators
                     temp_parts = []
                     if leader_temp is not None:
@@ -944,9 +953,9 @@ def _status_logging_thread(
                     if follower_temp is not None:
                         follower_indicator = "🔥" if follower_temp > 40 else ""
                         temp_parts.append(f"F:{follower_temp:3.0f}°C{follower_indicator}")
-                    
+
                     temp_str = " ".join(temp_parts) if temp_parts else "N/A"
-                    
+
                     # Format: "  shoulder_pan:  pos=  0.79rad  L:32°C F:34°C🔥"
                     line = f"  {joint_name:16s}  pos={position:6.3f}rad  {temp_str}"
                     lines.append(line[:70].ljust(70))
@@ -1162,9 +1171,9 @@ def teleoperate(
 
     # Set twin info for status display
     robot_uuid = robot.uuid if robot else ""
-    robot_name = robot.name if robot and hasattr(robot, 'name') else "so101-teleop"
+    robot_name = robot.name if robot and hasattr(robot, "name") else "so101-teleop"
     camera_uuid_val = camera.uuid if camera else ""
-    camera_name = camera.name if camera and hasattr(camera, 'name') else "camera-teleop"
+    camera_name = camera.name if camera and hasattr(camera, "name") else "camera-teleop"
     status_tracker.set_twin_info(robot_uuid, robot_name, camera_uuid_val, camera_name)
 
     # Ensure MQTT client is connected
@@ -1194,7 +1203,9 @@ def teleoperate(
 
     # Require follower when robot twin is provided (we send follower data to Cyberwave)
     if robot is not None and follower is None:
-        raise RuntimeError("Follower is required when robot twin is provided (follower data is sent to Cyberwave)")
+        raise RuntimeError(
+            "Follower is required when robot twin is provided (follower data is sent to Cyberwave)"
+        )
 
     if follower is not None and not follower.connected:
         raise RuntimeError("Follower is not connected")
@@ -1212,7 +1223,9 @@ def teleoperate(
 
     # Use follower motors for mappings when sending to Cyberwave (follower data is what we send)
     # Fall back to leader motors if follower not available (for camera-only mode)
-    motors_for_mapping = follower.motors if follower is not None else (leader.motors if leader is not None else {})
+    motors_for_mapping = (
+        follower.motors if follower is not None else (leader.motors if leader is not None else {})
+    )
 
     if motors_for_mapping:
         # Create mapping from joint names to joint indexes (motor IDs: 1-6)
@@ -1223,7 +1236,9 @@ def teleoperate(
         status_tracker.set_joint_index_to_name(joint_index_to_name)
 
         # Create mapping from joint names to normalization modes
-        joint_name_to_norm_mode = {name: motor.norm_mode for name, motor in motors_for_mapping.items()}
+        joint_name_to_norm_mode = {
+            name: motor.norm_mode for name, motor in motors_for_mapping.items()
+        }
 
         # Initialize last observation state (track normalized positions)
         # Follower returns normalized positions, worker thread handles conversion to degrees/radians
@@ -1628,16 +1643,18 @@ def main():
 
     # Initialize Cyberwave client early to check for camera settings
     cyberwave_client = Cyberwave()
-    
+
     # Load camera configuration: priority order is config file > auto-detect from asset > CLI args
     camera_config: Optional[TeleoperateCameraConfig] = None
     camera_twin = None
-    
+
     if args.camera_config:
         # Load from JSON file (highest priority)
         if not os.path.exists(args.camera_config):
             print(f"Error: Camera config file not found: {args.camera_config}")
-            print(f"Generate one with: python teleoperate.py --generate-camera-config {args.camera_config}")
+            print(
+                f"Generate one with: python teleoperate.py --generate-camera-config {args.camera_config}"
+            )
             sys.exit(1)
 
         try:
@@ -1657,7 +1674,7 @@ def main():
         depth_fps = camera_config.depth_fps
         depth_resolution = camera_config.get_depth_resolution()
         depth_publish_interval = camera_config.depth_publish_interval
-        
+
         # Determine camera asset from config
         if camera_type == "realsense":
             camera_asset = "intel/realsensed455"
@@ -1667,20 +1684,24 @@ def main():
         # If camera-uuid is provided, auto-detect camera type from asset
         # Try to detect camera type by fetching the twin with different asset keys
         camera_asset = None
-        
+
         # Try RealSense asset first
         try:
-            camera_twin = cyberwave_client.twin(asset_key="intel/realsensed455", twin_id=args.camera_uuid, name="camera")
+            camera_twin = cyberwave_client.twin(
+                asset_key="intel/realsensed455", twin_id=args.camera_uuid, name="camera"
+            )
             camera_asset = "intel/realsensed455"
         except Exception:
             # Try standard-cam asset
             try:
-                camera_twin = cyberwave_client.twin(asset_key="cyberwave/standard-cam", twin_id=args.camera_uuid, name="camera")
+                camera_twin = cyberwave_client.twin(
+                    asset_key="cyberwave/standard-cam", twin_id=args.camera_uuid, name="camera"
+                )
                 camera_asset = "cyberwave/standard-cam"
             except Exception as e:
                 logger.debug(f"Could not fetch camera twin: {e}")
                 # Fall back to detecting from args.camera_type if available
-                if hasattr(args, 'camera_type') and args.camera_type:
+                if hasattr(args, "camera_type") and args.camera_type:
                     if args.camera_type == "realsense":
                         camera_asset = "intel/realsensed455"
                     else:
@@ -1689,15 +1710,17 @@ def main():
                     # Default to standard-cam if we can't determine
                     camera_asset = "cyberwave/standard-cam"
                 # Create twin with detected/default asset
-                camera_twin = cyberwave_client.twin(asset_key=camera_asset, twin_id=args.camera_uuid, name="camera")
-        
+                camera_twin = cyberwave_client.twin(
+                    asset_key=camera_asset, twin_id=args.camera_uuid, name="camera"
+                )
+
         # Auto-detect camera type from asset and use defaults
         if camera_asset is None:
             camera_asset = "cyberwave/standard-cam"
-        
+
         detected_type = _detect_camera_type_from_asset(camera_asset)
         camera_config = _get_default_camera_config(detected_type)
-        
+
         camera_type = camera_config.camera_type
         camera_id = camera_config.camera_id
         camera_fps = camera_config.fps
@@ -1706,8 +1729,10 @@ def main():
         depth_fps = camera_config.depth_fps
         depth_resolution = camera_config.get_depth_resolution()
         depth_publish_interval = camera_config.depth_publish_interval
-        
-        logger.info(f"Auto-detected camera type '{detected_type}' from asset '{camera_asset}', using default settings")
+
+        logger.info(
+            f"Auto-detected camera type '{detected_type}' from asset '{camera_asset}', using default settings"
+        )
     else:
         # Use CLI arguments or defaults
         camera_type = args.camera_type
@@ -1728,14 +1753,16 @@ def main():
         depth_resolution = None
         if args.depth_resolution:
             depth_resolution = _parse_resolution(args.depth_resolution)
-        
+
         # Determine camera asset based on camera_type
         if camera_type == "realsense":
             camera_asset = "intel/realsensed455"
         else:
             camera_asset = "cyberwave/standard-cam"
-    
-    robot = cyberwave_client.twin(asset_key="the-robot-studio/so101", twin_id=args.twin_uuid, name="robot")
+
+    robot = cyberwave_client.twin(
+        asset_key="the-robot-studio/so101", twin_id=args.twin_uuid, name="robot"
+    )
     camera = camera_twin
     mqtt_client = cyberwave_client.mqtt
 
@@ -1761,7 +1788,9 @@ def main():
         from config import FollowerConfig
 
         follower_config = FollowerConfig(
-            port=args.follower_port, max_relative_target=args.max_relative_target, cameras=[camera_id] if isinstance(camera_id, int) else [0]
+            port=args.follower_port,
+            max_relative_target=args.max_relative_target,
+            cameras=[camera_id] if isinstance(camera_id, int) else [0],
         )
         follower = SO101Follower(config=follower_config)
         follower.connect()

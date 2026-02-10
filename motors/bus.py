@@ -48,9 +48,7 @@ class MotorsBus(ABC):
         pass
 
     @abstractmethod
-    def sync_write_positions(
-        self, motor_positions: Dict[int, float]
-    ) -> None:
+    def sync_write_positions(self, motor_positions: Dict[int, float]) -> None:
         """
         Synchronously write positions to multiple motors.
 
@@ -62,7 +60,4 @@ class MotorsBus(ABC):
     def _ensure_connected(self) -> None:
         """Ensure bus is connected, raise error if not."""
         if not self._connected:
-            raise DeviceNotConnectedError(
-                f"Motor bus on {self.port} is not connected"
-            )
-
+            raise DeviceNotConnectedError(f"Motor bus on {self.port} is not connected")

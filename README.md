@@ -114,7 +114,13 @@ so101-calibrate --type follower --port /dev/ttyACM1 --id red
 ### 4. Teleoperate with Cyberwave
 
 ```bash
-# Basic teleoperation with default camera
+# Basic teleoperation (twin will be created automatically if --twin-uuid is not provided)
+so101-teleoperate \
+    --leader-port /dev/ttyACM0 \
+    --follower-port /dev/ttyACM1 \
+    --fps 30
+
+# With existing twin UUID
 so101-teleoperate \
     --twin-uuid YOUR_TWIN_UUID \
     --leader-port /dev/ttyACM0 \
@@ -123,7 +129,6 @@ so101-teleoperate \
 
 # With camera configuration file
 so101-teleoperate \
-    --twin-uuid YOUR_TWIN_UUID \
     --leader-port /dev/ttyACM0 \
     --camera-config camera_config.json
 ```
@@ -216,7 +221,13 @@ Run teleoperation loop with Cyberwave integration and camera streaming.
 # Set environment variable first
 export CYBERWAVE_TOKEN=your_token_here
 
-# Basic teleoperation with CV2 USB camera
+# Basic teleoperation with CV2 USB camera (twin will be created automatically)
+so101-teleoperate \
+    --leader-port /dev/ttyACM0 \
+    --fps 30 \
+    --camera-fps 30
+
+# With existing twin UUID
 so101-teleoperate \
     --twin-uuid YOUR_TWIN_UUID \
     --leader-port /dev/ttyACM0 \
@@ -225,7 +236,6 @@ so101-teleoperate \
 
 # Use RealSense camera with depth streaming
 so101-teleoperate \
-    --twin-uuid YOUR_TWIN_UUID \
     --leader-port /dev/ttyACM0 \
     --follower-port /dev/ttyACM1 \
     --camera-type realsense \
@@ -235,20 +245,17 @@ so101-teleoperate \
 
 # Use IP camera / RTSP stream
 so101-teleoperate \
-    --twin-uuid YOUR_TWIN_UUID \
     --leader-port /dev/ttyACM0 \
     --camera-id "rtsp://192.168.1.100:554/stream" \
     --camera-resolution VGA
 
 # Use camera configuration file
 so101-teleoperate \
-    --twin-uuid YOUR_TWIN_UUID \
     --leader-port /dev/ttyACM0 \
     --camera-config camera_config.json
 
 # Camera-only mode (no teleoperation, just streaming)
 so101-teleoperate \
-    --twin-uuid YOUR_TWIN_UUID \
     --follower-port /dev/ttyACM1 \
     --camera-only \
     --camera-config camera_config.json
@@ -256,7 +263,7 @@ so101-teleoperate \
 
 **Options:**
 
-- `--twin-uuid`: UUID of the Cyberwave twin to update (required)
+- `--twin-uuid`: UUID of the Cyberwave twin to update (optional - if not provided, a new twin will be created automatically)
 - `--leader-port`: Serial port for leader device (required, unless using --camera-only)
 - `--follower-port`: Optional serial port for follower device
 - `--fps`: Target frames per second for teleoperation loop (default: 30)
@@ -342,7 +349,12 @@ so101-teleoperate --list-realsense
 #### Using Camera Configuration
 
 ```bash
-# Use config file instead of CLI arguments
+# Use config file instead of CLI arguments (twin will be created automatically)
+so101-teleoperate \
+    --leader-port /dev/ttyACM0 \
+    --camera-config camera_config.json
+
+# Or with existing twin UUID
 so101-teleoperate \
     --twin-uuid YOUR_TWIN_UUID \
     --leader-port /dev/ttyACM0 \
@@ -358,7 +370,12 @@ Run remote operation loop: receive joint states via MQTT and write to follower m
 **Note:** Requires `CYBERWAVE_TOKEN` environment variable to be set.
 
 ```bash
-# Basic remote operation with CV2 camera
+# Basic remote operation with CV2 camera (twin will be created automatically)
+so101-remoteoperate \
+    --follower-port /dev/ttyACM1 \
+    --camera-fps 30
+
+# With existing twin UUID
 so101-remoteoperate \
     --twin-uuid YOUR_TWIN_UUID \
     --follower-port /dev/ttyACM1 \
@@ -366,7 +383,6 @@ so101-remoteoperate \
 
 # Use RealSense camera with depth
 so101-remoteoperate \
-    --twin-uuid YOUR_TWIN_UUID \
     --follower-port /dev/ttyACM1 \
     --camera-type realsense \
     --enable-depth \
@@ -374,14 +390,13 @@ so101-remoteoperate \
 
 # Use camera configuration file
 so101-remoteoperate \
-    --twin-uuid YOUR_TWIN_UUID \
     --follower-port /dev/ttyACM1 \
     --camera-config camera_config.json
 ```
 
 **Options:**
 
-- `--twin-uuid`: UUID of the Cyberwave twin to subscribe to (required)
+- `--twin-uuid`: UUID of the Cyberwave twin to subscribe to (optional - if not provided, a new twin will be created automatically)
 - `--follower-port`: Serial port for follower device (required)
 - `--max-relative-target`: Maximum change per update for follower (safety limit)
 - `--follower-id`: Device identifier for calibration file (default: 'follower1')
