@@ -331,6 +331,7 @@ class StatusTracker:
         self.lock = threading.Lock()
         self.script_started = False
         self.mqtt_connected = False
+        self.camera_enabled = False  # Whether camera streaming was configured at all
         self.camera_detected = False
         self.camera_started = False
         # WebRTC states: "idle" (red), "connecting" (yellow), "streaming" (green)
@@ -405,6 +406,7 @@ class StatusTracker:
             return {
                 "script_started": self.script_started,
                 "mqtt_connected": self.mqtt_connected,
+                "camera_enabled": self.camera_enabled,
                 "camera_detected": self.camera_detected,
                 "camera_started": self.camera_started,
                 "webrtc_state": self.webrtc_state,
@@ -896,28 +898,35 @@ def _status_logging_thread(
 
             # Twin info
             robot_name = status["robot_name"] or "N/A"
-            camera_name = status["camera_name"] or "N/A"
             lines.append(f"Robot:  {robot_name} ({status['robot_uuid']})"[:70].ljust(70))
-            lines.append(f"Camera: {camera_name} ({status['camera_uuid']})"[:70].ljust(70))
+            if status["camera_enabled"]:
+                camera_name = status["camera_name"] or "N/A"
+                lines.append(f"Camera: {camera_name} ({status['camera_uuid']})"[:70].ljust(70))
+            else:
+                lines.append("Camera: not configured".ljust(70))
             lines.append("-" * 70)
 
             # Status indicators
             script_icon = "🟢" if status["script_started"] else "🟡"
             mqtt_icon = "🟢" if status["mqtt_connected"] else "🔴"
-            if not status["camera_detected"]:
-                camera_icon = "🔴"
-            elif not status["camera_started"]:
-                camera_icon = "🟡"
+            if not status["camera_enabled"]:
+                camera_icon = "⚫"  # Not configured
+                webrtc_icon = "⚫"
             else:
-                camera_icon = "🟢"
-            # WebRTC: idle=red, connecting=yellow, streaming=green
-            webrtc_state = status["webrtc_state"]
-            if webrtc_state == "streaming":
-                webrtc_icon = "🟢"
-            elif webrtc_state == "connecting":
-                webrtc_icon = "🟡"
-            else:
-                webrtc_icon = "🔴"
+                if not status["camera_detected"]:
+                    camera_icon = "🔴"
+                elif not status["camera_started"]:
+                    camera_icon = "🟡"
+                else:
+                    camera_icon = "🟢"
+                # WebRTC: idle=red, connecting=yellow, streaming=green
+                webrtc_state = status["webrtc_state"]
+                if webrtc_state == "streaming":
+                    webrtc_icon = "🟢"
+                elif webrtc_state == "connecting":
+                    webrtc_icon = "🟡"
+                else:
+                    webrtc_icon = "🔴"
 
             lines.append(
                 f"Script:{script_icon} MQTT:{mqtt_icon} Camera:{camera_icon} WebRTC:{webrtc_icon}".ljust(
@@ -1168,12 +1177,13 @@ def teleoperate(
     # Create status tracker
     status_tracker = StatusTracker()
     status_tracker.script_started = True
+    status_tracker.camera_enabled = camera is not None
 
     # Set twin info for status display
     robot_uuid = robot.uuid if robot else ""
     robot_name = robot.name if robot and hasattr(robot, "name") else "so101-teleop"
     camera_uuid_val = camera.uuid if camera else ""
-    camera_name = camera.name if camera and hasattr(camera, "name") else "camera-teleop"
+    camera_name = camera.name if camera and hasattr(camera, "name") else ""
     status_tracker.set_twin_info(robot_uuid, robot_name, camera_uuid_val, camera_name)
 
     # Ensure MQTT client is connected
@@ -1541,6 +1551,7 @@ def main():
         "--camera-uuid",
         type=str,
         required=False,
+        default=os.getenv("CYBERWAVE_METADATA_CAMERA_TWIN_UUID"),
         help="UUID of the twin to stream camera to (default: same as --twin-uuid)",
     )
     parser.add_argument(
@@ -1567,7 +1578,7 @@ def main():
     parser.add_argument(
         "--camera-resolution",
         type=str,
-        default="VGA",
+        default=os.getenv("CYBERWAVE_METADATA_CAMERA_RESOLUTION", "VGA"),
         help="Camera resolution: QVGA (320x240), VGA (640x480), SVGA (800x600), HD (1280x720), "
         "FULL_HD (1920x1080), or WIDTHxHEIGHT format (default: VGA)",
     )
@@ -1674,15 +1685,33 @@ def main():
                 print()
         sys.exit(0)
 
-    if args.camera_uuid is None:
-        args.camera_uuid = args.twin_uuid
+    # Validate: --camera-only requires --camera-uuid
+    if args.camera_only and not args.camera_uuid:
+        print("Error: --camera-uuid is required when using --camera-only")
+        sys.exit(1)
 
-    # Initialize Cyberwave client early to check for camera settings
+    # Initialize Cyberwave client
     cyberwave_client = Cyberwave()
 
-    # Load camera configuration: priority order is config file > auto-detect from asset > CLI args
+    # Camera setup is optional - only configure when explicitly requested
+    # via --camera-uuid or --camera-config. Camera streaming is being moved
+    # to a separate codebase; this support is kept for backwards compatibility.
     camera_config: Optional[TeleoperateCameraConfig] = None
     camera_twin = None
+
+    # Default camera values (only used when a camera twin is configured)
+    camera_type = args.camera_type
+    camera_fps = args.camera_fps
+    enable_depth = args.enable_depth
+    depth_fps = args.depth_fps
+    depth_publish_interval = args.depth_publish_interval
+    camera_id: Union[int, str] = args.camera_id
+    try:
+        camera_id = int(args.camera_id)
+    except ValueError:
+        pass  # Keep as string (URL)
+    camera_resolution = _parse_resolution(args.camera_resolution)
+    depth_resolution = _parse_resolution(args.depth_resolution) if args.depth_resolution else None
 
     if args.camera_config:
         # Load from JSON file (highest priority)
@@ -1711,11 +1740,15 @@ def main():
         depth_resolution = camera_config.get_depth_resolution()
         depth_publish_interval = camera_config.depth_publish_interval
 
-        # Determine camera asset from config
-        if camera_type == "realsense":
-            camera_asset = "intel/realsensed455"
-        else:
-            camera_asset = "cyberwave/standard-cam"
+        # Create camera twin if camera-uuid is also provided
+        if args.camera_uuid:
+            if camera_type == "realsense":
+                camera_asset = "intel/realsensed455"
+            else:
+                camera_asset = "cyberwave/standard-cam"
+            camera_twin = cyberwave_client.twin(
+                asset_key=camera_asset, twin_id=args.camera_uuid, name="camera"
+            )
     elif args.camera_uuid:
         # If camera-uuid is provided, auto-detect camera type from asset
         # Try to detect camera type by fetching the twin with different asset keys
@@ -1769,32 +1802,6 @@ def main():
         logger.info(
             f"Auto-detected camera type '{detected_type}' from asset '{camera_asset}', using default settings"
         )
-    else:
-        # Use CLI arguments or defaults
-        camera_type = args.camera_type
-        camera_fps = args.camera_fps
-        enable_depth = args.enable_depth
-        depth_fps = args.depth_fps
-        depth_publish_interval = args.depth_publish_interval
-
-        # Parse camera_id (convert to int if it's a number)
-        camera_id: Union[int, str] = args.camera_id
-        try:
-            camera_id = int(args.camera_id)
-        except ValueError:
-            camera_id = args.camera_id  # Keep as string (URL)
-
-        # Parse resolutions
-        camera_resolution = _parse_resolution(args.camera_resolution)
-        depth_resolution = None
-        if args.depth_resolution:
-            depth_resolution = _parse_resolution(args.depth_resolution)
-
-        # Determine camera asset based on camera_type
-        if camera_type == "realsense":
-            camera_asset = "intel/realsensed455"
-        else:
-            camera_asset = "cyberwave/standard-cam"
 
     robot = cyberwave_client.twin(
         asset_key="the-robot-studio/so101", twin_id=args.twin_uuid, name="robot"
@@ -1823,10 +1830,15 @@ def main():
             raise RuntimeError("--follower-port is required when using --camera-only")
         from config import FollowerConfig
 
+        # Only configure cameras on the follower if a camera twin is being used
+        follower_cameras = None
+        if camera_twin is not None:
+            follower_cameras = [camera_id] if isinstance(camera_id, int) else [0]
+
         follower_config = FollowerConfig(
             port=args.follower_port,
             max_relative_target=args.max_relative_target,
-            cameras=[camera_id] if isinstance(camera_id, int) else [0],
+            cameras=follower_cameras,
         )
         follower = SO101Follower(config=follower_config)
         follower.connect()
