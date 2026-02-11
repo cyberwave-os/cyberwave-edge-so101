@@ -31,4 +31,4 @@ export_vars(data)
 ")"
 fi
 
-exec python "$@"
+exec python main.py "$@"
