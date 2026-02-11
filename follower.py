@@ -40,7 +40,7 @@ class SO101Follower(SO101Robot):
             port: Serial port path (e.g., "/dev/tty.usbmodem456")
             use_degrees: Whether to use degrees for position values (default: False, uses RANGE_M100_100)
             id: Device identifier for calibration file management
-            calibration_dir: Directory for calibration files (default: ~/.so101_lib/calibrations)
+            calibration_dir: Directory for calibration files (default: ~/.cyberwave/so101_lib/calibrations)
             max_relative_target: Maximum allowed change from current position (safety limit)
             cameras: Optional list of camera configurations (not implemented yet)
         """

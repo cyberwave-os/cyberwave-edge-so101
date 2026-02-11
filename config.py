@@ -21,7 +21,7 @@ class LeaderConfig:
     def __post_init__(self):
         """Set default calibration directory if not provided."""
         if self.calibration_dir is None:
-            self.calibration_dir = Path.home() / ".so101_lib" / "calibrations"
+            self.calibration_dir = Path.home() / ".cyberwave" / "so101_lib" / "calibrations"
 
 
 @dataclass
@@ -41,7 +41,7 @@ class FollowerConfig:
     def __post_init__(self):
         """Set default calibration directory if not provided."""
         if self.calibration_dir is None:
-            self.calibration_dir = Path.home() / ".so101_lib" / "calibrations"
+            self.calibration_dir = Path.home() / ".cyberwave" / "so101_lib" / "calibrations"
 
 
 # {

@@ -37,7 +37,7 @@ class SO101Leader(SO101Robot):
             port: Serial port path (e.g., "/dev/tty.usbmodem123")
             use_degrees: Whether to use degrees for position values
             id: Device identifier for calibration file management
-            calibration_dir: Directory for calibration files (default: ~/.so101_lib/calibrations)
+            calibration_dir: Directory for calibration files (default: ~/.cyberwave/so101_lib/calibrations)
         """
         super().__init__()
         if config is not None:

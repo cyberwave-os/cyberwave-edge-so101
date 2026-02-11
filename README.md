@@ -247,7 +247,7 @@ so101-calibrate --type follower --port /dev/ttyACM1
 2. Press ENTER to set homing offsets
 3. Move all joints through their full ranges of motion
 4. Press ENTER to stop recording
-5. Calibration is saved to `~/.so101_lib/calibrations/{id}.json`
+5. Calibration is saved to `~/.cyberwave/so101_lib/calibrations/{id}.json`
 
 ### `so101-teleoperate`
 
@@ -490,7 +490,7 @@ leader.connect()
 # Run calibration (interactive)
 leader.calibrate()
 
-# Calibration is automatically saved to ~/.so101_lib/calibrations/leader1.json
+# Calibration is automatically saved to ~/.cyberwave/so101_lib/calibrations/leader1.json
 ```
 
 ### Teleoperation
@@ -601,7 +601,7 @@ finally:
 
 ## Calibration Format
 
-Calibration files are saved as JSON in `~/.so101_lib/calibrations/{id}.json`:
+Calibration files are saved as JSON in `~/.cyberwave/so101_lib/calibrations/{id}.json`:
 
 ```json
 {
@@ -707,7 +707,7 @@ config = LeaderConfig(
     port="/dev/ttyACM0",  # Serial port
     use_degrees=True,              # Use degrees (deprecated, use norm_mode instead)
     id="leader1",                  # Device identifier
-    calibration_dir=None,          # Custom calibration directory (default: ~/.so101_lib/calibrations)
+    calibration_dir=None,          # Custom calibration directory (default: ~/.cyberwave/so101_lib/calibrations)
     voltage_rating=None,           # 5 or 12 (auto-detected if None)
 )
 ```

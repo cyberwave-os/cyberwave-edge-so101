@@ -70,7 +70,7 @@ Examples:
     parser.add_argument(
         "--calibration-dir",
         type=str,
-        help="Directory for calibration files (default: ~/.so101_lib/calibrations)",
+        help="Directory for calibration files (default: ~/.cyberwave/so101_lib/calibrations)",
     )
     parser.add_argument(
         "--voltage-rating",

@@ -89,7 +89,7 @@ def write_position(
         timeout: Maximum time to wait for position (seconds)
         tolerance: Position tolerance for considering target reached (normalized units)
         device_id: Device identifier for calibration file (default: "leader1" or "follower1")
-        calibration_dir: Custom calibration directory (default: ~/.so101_lib/calibrations)
+        calibration_dir: Custom calibration directory (default: ~/.cyberwave/so101_lib/calibrations)
     """
     # Validate motor ID and position
     is_valid, error_msg = validate_position(motor_id, position)
@@ -325,7 +325,7 @@ Motor IDs:
         "--calibration-dir",
         type=str,
         default=None,
-        help="Custom calibration directory (default: ~/.so101_lib/calibrations). "
+        help="Custom calibration directory (default: ~/.cyberwave/so101_lib/calibrations). "
         "Calibration file is expected at: {calibration_dir}/{id}.json",
     )
     parser.add_argument(
