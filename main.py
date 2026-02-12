@@ -65,7 +65,7 @@ def handle_controller_changed(client: Cyberwave, twin_uuid: str, data: dict) -> 
     if controller_type == "teleop":
         start_teleoperate(client, twin_uuid, controller)
     elif controller_type == "localop":
-        start_localop(controller)
+        start_localop(client, twin_uuid, controller)
 
 
 def start_teleoperate(client: Cyberwave, twin_uuid: str, controller: dict) -> None:
@@ -161,8 +161,113 @@ def start_teleoperate(client: Cyberwave, twin_uuid: str, controller: dict) -> No
     logger.info("Teleoperate thread started")
 
 
-def start_localop(controller: dict) -> None:
+def start_localop(client: Cyberwave, twin_uuid: str, controller: dict) -> None:
+    """Start local operation (localop) for the SO101 leader+follower.
+
+    Reads hardware configuration from ``CYBERWAVE_METADATA_*`` environment
+    variables, creates the leader + follower + twins, and launches the
+    ``teleoperate`` loop from :pymod:`teleoperate` in a background thread so
+    the MQTT command listener keeps running.
+    """
+    global _current_thread, _current_follower
+
     logger.info("Starting localop: %s", controller)
+
+    # -- hardware config from environment -----------------------------------
+    follower_port = os.getenv("CYBERWAVE_METADATA_FOLLOWER_PORT")
+    if not follower_port:
+        logger.error("CYBERWAVE_METADATA_FOLLOWER_PORT is not set – cannot start localop")
+        return
+
+    leader_port = os.getenv("CYBERWAVE_METADATA_LEADER_PORT")
+    if not leader_port:
+        logger.error("CYBERWAVE_METADATA_LEADER_PORT is not set – cannot start localop")
+        return
+
+    follower_id = os.getenv("CYBERWAVE_METADATA_FOLLOWER_ID", "follower1")
+    max_relative_target_str = os.getenv("CYBERWAVE_METADATA_MAX_RELATIVE_TARGET")
+    max_relative_target = float(max_relative_target_str) if max_relative_target_str else None
+
+    # -- camera config (optional) -------------------------------------------
+    camera_twin_uuid = os.getenv("CYBERWAVE_METADATA_CAMERA_TWIN_UUID")
+    camera_type = os.getenv("CYBERWAVE_METADATA_CAMERA_TYPE", "cv2")
+    camera_fps = int(os.getenv("CYBERWAVE_METADATA_CAMERA_FPS", "30"))
+    camera_resolution_str = os.getenv("CYBERWAVE_METADATA_CAMERA_RESOLUTION", "VGA")
+
+    def _run() -> None:
+        global _current_follower
+
+        from config import FollowerConfig, LeaderConfig
+        from follower import SO101Follower
+        from leader import SO101Leader
+        from teleoperate import _parse_resolution, teleoperate
+
+        # Robot twin
+        robot = client.twin(
+            asset_key="the-robot-studio/so101",
+            twin_id=twin_uuid,
+            name="robot",
+        )
+
+        # Camera twin (only when explicitly configured)
+        camera = None
+        if camera_twin_uuid:
+            camera_asset = (
+                "intel/realsensed455"
+                if "realsense" in camera_type.lower()
+                else "cyberwave/standard-cam"
+            )
+            camera = client.twin(
+                asset_key=camera_asset,
+                twin_id=camera_twin_uuid,
+                name="camera",
+            )
+
+        # Leader
+        leader_config = LeaderConfig(port=leader_port)
+        leader = SO101Leader(config=leader_config)
+        leader.connect()
+
+        # Follower
+        follower_config = FollowerConfig(
+            port=follower_port,
+            max_relative_target=max_relative_target,
+            id=follower_id,
+            cameras=[0] if camera is not None else None,
+        )
+        follower = SO101Follower(config=follower_config)
+        follower.connect()
+        _current_follower = follower
+
+        resolution = _parse_resolution(camera_resolution_str)
+
+        try:
+            teleoperate(
+                leader=leader,
+                cyberwave_client=client,
+                follower=follower,
+                robot=robot,
+                camera=camera,
+                camera_fps=camera_fps,
+                camera_type=camera_type,
+                camera_resolution=resolution,
+            )
+        except Exception:
+            logger.exception("Localop loop failed")
+        finally:
+            try:
+                follower.disconnect()
+            except Exception:
+                logger.exception("Error disconnecting follower after localop")
+            try:
+                leader.disconnect()
+            except Exception:
+                logger.exception("Error disconnecting leader after localop")
+            _current_follower = None
+
+    _current_thread = threading.Thread(target=_run, daemon=True, name="localop")
+    _current_thread.start()
+    logger.info("Localop thread started")
 
 
 async def main() -> None:
