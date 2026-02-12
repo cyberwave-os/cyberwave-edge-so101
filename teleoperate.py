@@ -11,27 +11,26 @@ import select
 import sys
 import threading
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Optional, Union
 
-from dotenv import load_dotenv
-
 from cyberwave import Cyberwave, Twin
-from cyberwave.utils import TimeReference
 
 # Import camera configuration and streamers from cyberwave SDK
 from cyberwave.sensor import (
-    CV2CameraStreamer,
     CameraConfig,
+    CV2CameraStreamer,
     Resolution,
 )
+from cyberwave.utils import TimeReference
+from dotenv import load_dotenv
 
 # RealSense is optional - only import if available
 try:
     from cyberwave.sensor import (
-        RealSenseStreamer,
         RealSenseConfig,
         RealSenseDiscovery,
+        RealSenseStreamer,
     )
 
     _has_realsense = True
@@ -165,6 +164,10 @@ class TeleoperateCameraConfig:
         if "depth_resolution" in data and isinstance(data["depth_resolution"], str):
             width, height = map(int, data["depth_resolution"].lower().split("x"))
             data["depth_resolution"] = [width, height]
+
+        # Normalize enable_depth: handle string "true"/"false" from JSON
+        if "enable_depth" in data and isinstance(data["enable_depth"], str):
+            data["enable_depth"] = data["enable_depth"].lower() in ("true", "1", "yes")
 
         logger.info(f"Camera configuration loaded from {path}")
         return cls(**data)
@@ -548,7 +551,11 @@ def _camera_worker_thread(
                 # WebRTC starts in connecting state when camera worker begins
                 status_tracker.update_webrtc_state("connecting")
 
-            # Run with auto-reconnect - this handles all command subscriptions internally
+            # Start streaming immediately (still listen for start_video/stop_video)
+            streamer._should_reconnect = streamer.auto_reconnect
+            await streamer.start()
+
+            # Run with auto-reconnect - handles command subscriptions and connection monitoring
             await streamer.run_with_auto_reconnect(
                 stop_event=async_stop_event,
                 command_callback=command_callback,
@@ -1833,7 +1840,8 @@ def main():
         # Only configure cameras on the follower if a camera twin is being used
         follower_cameras = None
         if camera_twin is not None:
-            follower_cameras = [camera_id] if isinstance(camera_id, int) else [0]
+            # Support both int (device index) and str (URL) for camera_id
+            follower_cameras = [camera_id]
 
         follower_config = FollowerConfig(
             port=args.follower_port,
