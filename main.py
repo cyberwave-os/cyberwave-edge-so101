@@ -11,6 +11,8 @@ import signal
 import sys
 import threading
 from typing import Optional
+from config import FollowerConfig
+from follower import SO101Follower
 
 from cyberwave import Cyberwave
 
@@ -28,6 +30,123 @@ _current_thread: Optional[threading.Thread] = None
 _current_follower: Optional[object] = (
     None  # SO101Follower – typed loosely to avoid top-level import
 )
+
+
+def _trigger_alert_and_switch_to_calibration(
+    client: Cyberwave,
+    twin_uuid: str,
+    follower_port: str,
+    follower_id: str = "follower1",
+    leader_port: Optional[str] = None,
+    leader_id: str = "leader1",
+) -> None:
+    """
+    We ended up here because:
+    - The user tried to start local teleop or remote teleop AND
+    - No calibration file was found
+    So what happens is:
+    - We should trigger an alert (check the alert example in the SDK)
+    - We should switch to calibration mode
+
+    Then once the calibration is done: We should resolve the alert and switch back to the original mode.
+    """
+
+    # Create a robot twin to access the alerts API
+    robot = client.twin(
+        twin_id=twin_uuid,
+    )
+
+    # Trigger an alert to notify the user that calibration is needed
+    alert = robot.alerts.create(
+        name="Calibration Needed",
+        description="No calibration file found for the follower arm. Switching to calibration mode.",
+        severity="warning",
+        alert_type="calibration_needed",
+    )
+    logger.info("Created calibration alert %s for twin %s", alert.uuid, twin_uuid)
+
+    # TODO:Notify the system that we are switching to calibration mode
+    # client.mqtt.publish_command_message(twin_uuid, "calibrating")
+
+    try:
+        import subprocess
+
+        # Run the calibration script as a subprocess
+        calibrate_cmd = [
+            sys.executable,
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "calibrate.py"),
+            "--type",
+            "follower",
+            "--port",
+            follower_port,
+            "--id",
+            follower_id,
+        ]
+        logger.info("Starting calibration subprocess: %s", " ".join(calibrate_cmd))
+
+        result = subprocess.run(calibrate_cmd)
+
+        if result.returncode != 0:
+            raise RuntimeError(f"Calibration subprocess exited with code {result.returncode}")
+
+        logger.info("Calibration completed for follower %s", follower_id)
+
+        # If there is also a leader, calibrate it too
+        if leader_port is not None:
+            leader_cmd = [
+                sys.executable,
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "calibrate.py"),
+                "--type",
+                "leader",
+                "--port",
+                leader_port,
+                "--id",
+                leader_id,
+            ]
+            logger.info("Starting leader calibration subprocess: %s", " ".join(leader_cmd))
+
+            result = subprocess.run(leader_cmd)
+
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"Leader calibration subprocess exited with code {result.returncode}"
+                )
+
+            logger.info("Calibration completed for leader %s", leader_id)
+
+        # Resolve the alert now that calibration is done
+        alert.resolve()
+        logger.info("Calibration alert %s resolved", alert.uuid)
+
+    except Exception:
+        logger.exception("Calibration failed for follower %s", follower_id)
+        # Update the alert to reflect the failure
+        alert.update(
+            severity="error",
+            description="Automatic calibration failed. Please calibrate manually.",
+        )
+        client.mqtt.publish_command_message(twin_uuid, "error")
+        raise
+
+
+def _is_follower_calibrated(follower_id: str = "follower1") -> bool:
+    """Check if the follower is calibrated."""
+    from pathlib import Path
+
+    calibration_path = (
+        Path.home() / ".cyberwave" / "so101_lib" / "calibrations" / f"{follower_id}.json"
+    )
+    return calibration_path.exists()
+
+
+def _is_leader_calibrated(leader_id: str = "leader1") -> bool:
+    """Check if the leader is calibrated."""
+    from pathlib import Path
+
+    calibration_path = (
+        Path.home() / ".cyberwave" / "so101_lib" / "calibrations" / f"{leader_id}.json"
+    )
+    return calibration_path.exists()
 
 
 def _stop_current_operation() -> None:
@@ -90,7 +209,12 @@ def start_teleoperate(client: Cyberwave, twin_uuid: str, controller: dict) -> No
     max_relative_target_str = os.getenv("CYBERWAVE_METADATA_MAX_RELATIVE_TARGET")
     max_relative_target = float(max_relative_target_str) if max_relative_target_str else None
 
-    # -- camera config (optional) -------------------------------------------
+    # Check if the follower is calibrated. if not, trigger an alert and switch to calibration mode
+    if not _is_follower_calibrated(follower_port):
+        _trigger_alert_and_switch_to_calibration(client, twin_uuid, follower_port, follower_id)
+        return
+
+    # -- camera config (deprecated) -------------------------------------------
     camera_twin_uuid = os.getenv("CYBERWAVE_METADATA_CAMERA_TWIN_UUID")
     camera_type = os.getenv("CYBERWAVE_METADATA_CAMERA_TYPE", "cv2")
     camera_fps = int(os.getenv("CYBERWAVE_METADATA_CAMERA_FPS", "30"))
@@ -107,7 +231,6 @@ def start_teleoperate(client: Cyberwave, twin_uuid: str, controller: dict) -> No
         robot = client.twin(
             asset_key="the-robot-studio/so101",
             twin_id=twin_uuid,
-            name="robot",
         )
 
         # Camera twin (only when explicitly configured)
@@ -121,7 +244,6 @@ def start_teleoperate(client: Cyberwave, twin_uuid: str, controller: dict) -> No
             camera = client.twin(
                 asset_key=camera_asset,
                 twin_id=camera_twin_uuid,
-                name="camera",
             )
 
         # Follower
@@ -185,8 +307,16 @@ def start_localop(client: Cyberwave, twin_uuid: str, controller: dict) -> None:
         return
 
     follower_id = os.getenv("CYBERWAVE_METADATA_FOLLOWER_ID", "follower1")
+    leader_id = os.getenv("CYBERWAVE_METADATA_LEADER_ID", "leader1")
     max_relative_target_str = os.getenv("CYBERWAVE_METADATA_MAX_RELATIVE_TARGET")
     max_relative_target = float(max_relative_target_str) if max_relative_target_str else None
+
+    # Check if the follower and leader are calibrated. if not, trigger an alert and switch to calibration mode
+    if not _is_follower_calibrated(follower_id) or not _is_leader_calibrated(leader_id):
+        _trigger_alert_and_switch_to_calibration(
+            client, twin_uuid, follower_port, follower_id, leader_port, leader_id
+        )
+        return
 
     # -- camera config (optional) -------------------------------------------
     camera_twin_uuid = os.getenv("CYBERWAVE_METADATA_CAMERA_TWIN_UUID")
@@ -206,7 +336,6 @@ def start_localop(client: Cyberwave, twin_uuid: str, controller: dict) -> None:
         robot = client.twin(
             asset_key="the-robot-studio/so101",
             twin_id=twin_uuid,
-            name="robot",
         )
 
         # Camera twin (only when explicitly configured)
@@ -220,7 +349,6 @@ def start_localop(client: Cyberwave, twin_uuid: str, controller: dict) -> None:
             camera = client.twin(
                 asset_key=camera_asset,
                 twin_id=camera_twin_uuid,
-                name="camera",
             )
 
         # Leader
