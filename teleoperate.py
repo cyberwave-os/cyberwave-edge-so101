@@ -1435,9 +1435,11 @@ def teleoperate(
                             radians = normalized_pos * math.pi / 180.0
                     observations[joint_index] = radians
             # Send follower observations to Cyberwave as single update
+            # together with the desired actual frequency
             mqtt_client.publish_initial_observation(
                 twin_uuid=robot.uuid,
                 observations=observations,
+                fps=fps
             )
 
     except Exception:
