@@ -11,27 +11,26 @@ import select
 import sys
 import threading
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Optional, Union
 
-from dotenv import load_dotenv
-
 from cyberwave import Cyberwave, Twin
-from cyberwave.utils import TimeReference
+from cyberwave.twin import DepthCameraTwin, CameraTwin
 
 # Import camera configuration and streamers from cyberwave SDK
 from cyberwave.sensor import (
     CV2CameraStreamer,
-    CameraConfig,
     Resolution,
 )
+from cyberwave.utils import TimeReference
+from dotenv import load_dotenv
 
 # RealSense is optional - only import if available
 try:
     from cyberwave.sensor import (
-        RealSenseStreamer,
         RealSenseConfig,
         RealSenseDiscovery,
+        RealSenseStreamer,
     )
 
     _has_realsense = True
@@ -49,6 +48,15 @@ logger = logging.getLogger(__name__)
 
 # Default camera config file path
 DEFAULT_CAMERA_CONFIG_PATH = "camera_config.json"
+
+
+# Default camera config directory (same structure as calibration)
+def get_default_camera_config_path() -> str:
+    """Get default camera config path in ~/.cyberwave/so101_lib/camera/camera_config.json"""
+    from pathlib import Path
+
+    config_dir = Path.home() / ".cyberwave" / "so101_lib" / "camera"
+    return str(config_dir / "camera_config.json")
 
 
 @dataclass
@@ -165,6 +173,10 @@ class TeleoperateCameraConfig:
         if "depth_resolution" in data and isinstance(data["depth_resolution"], str):
             width, height = map(int, data["depth_resolution"].lower().split("x"))
             data["depth_resolution"] = [width, height]
+
+        # Normalize enable_depth: handle string "true"/"false" from JSON
+        if "enable_depth" in data and isinstance(data["enable_depth"], str):
+            data["enable_depth"] = data["enable_depth"].lower() in ("true", "1", "yes")
 
         logger.info(f"Camera configuration loaded from {path}")
         return cls(**data)
@@ -472,22 +484,21 @@ def _camera_worker_thread(
         # Create async stop event from threading.Event
         async_stop_event = asyncio.Event()
 
-        # Ensure MQTT is connected
+        # Ensure MQTT is connected and wait for connection (required for WebRTC offer/answer)
         if not client.mqtt.connected:
             client.mqtt.connect()
+        max_wait = 10.0
+        wait_start = time.time()
+        while not client.mqtt.connected:
+            if time.time() - wait_start > max_wait:
+                raise RuntimeError("Failed to connect to MQTT broker - cannot send WebRTC offer")
+            await asyncio.sleep(0.1)
 
         # Create camera streamer based on camera type
         streamer = None
         camera_type_lower = camera_type.lower()
 
         if camera_type_lower == "cv2":
-            # Create CV2 camera config
-            camera_config = CameraConfig(
-                resolution=resolution,
-                fps=fps,
-                camera_id=camera_id if isinstance(camera_id, int) else 0,
-            )
-
             # Create CV2 camera streamer
             streamer = CV2CameraStreamer(
                 client=client.mqtt,
@@ -545,10 +556,11 @@ def _camera_worker_thread(
             # Update status when camera starts
             if status_tracker:
                 status_tracker.update_camera_status(detected=True, started=True)
-                # WebRTC starts in connecting state when camera worker begins
-                status_tracker.update_webrtc_state("connecting")
+                # WebRTC starts in idle state, waiting for start_video command
+                status_tracker.update_webrtc_state("idle")
 
-            # Run with auto-reconnect - this handles all command subscriptions internally
+            # Run with auto-reconnect - handles command subscriptions and connection monitoring
+            # Waits for start_video command before starting streaming
             await streamer.run_with_auto_reconnect(
                 stop_event=async_stop_event,
                 command_callback=command_callback,
@@ -566,9 +578,11 @@ def _camera_worker_thread(
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(_run_camera_streamer())
-    except Exception:
+    except Exception as e:
         if status_tracker:
             status_tracker.increment_errors()
+        # Surface camera/WebRTC errors so user can diagnose (logging is disabled)
+        print(f"Camera streaming error: {e}", file=sys.stderr)
     finally:
         if loop is not None:
             try:
@@ -1713,18 +1727,29 @@ def main():
     camera_resolution = _parse_resolution(args.camera_resolution)
     depth_resolution = _parse_resolution(args.depth_resolution) if args.depth_resolution else None
 
+    # Check for camera config file in default location first (like calibration)
+    default_camera_config_path = get_default_camera_config_path()
+    camera_config_file_to_load = None
+
     if args.camera_config:
-        # Load from JSON file (highest priority)
-        if not os.path.exists(args.camera_config):
-            print(f"Error: Camera config file not found: {args.camera_config}")
+        # Explicit config file provided (highest priority)
+        camera_config_file_to_load = args.camera_config
+    elif os.path.exists(default_camera_config_path):
+        # Check default location (~/.cyberwave/so101_lib/camera/camera_config.json)
+        camera_config_file_to_load = default_camera_config_path
+
+    if camera_config_file_to_load:
+        # Load from JSON file
+        if not os.path.exists(camera_config_file_to_load):
+            print(f"Error: Camera config file not found: {camera_config_file_to_load}")
             print(
-                f"Generate one with: python teleoperate.py --generate-camera-config {args.camera_config}"
+                f"Generate one with: python teleoperate.py --generate-camera-config {camera_config_file_to_load}"
             )
             sys.exit(1)
 
         try:
-            camera_config = TeleoperateCameraConfig.load(args.camera_config)
-            print(f"Loaded camera config from: {args.camera_config}")
+            camera_config = TeleoperateCameraConfig.load(camera_config_file_to_load)
+            print(f"Loaded camera config from: {camera_config_file_to_load}")
             print(f"Config: {camera_config}")
         except Exception as e:
             print(f"Error loading camera config: {e}")
@@ -1742,66 +1767,46 @@ def main():
 
         # Create camera twin if camera-uuid is also provided
         if args.camera_uuid:
-            if camera_type == "realsense":
-                camera_asset = "intel/realsensed455"
-            else:
-                camera_asset = "cyberwave/standard-cam"
-            camera_twin = cyberwave_client.twin(
-                asset_key=camera_asset, twin_id=args.camera_uuid, name="camera"
-            )
+            camera_twin = cyberwave_client.twin(twin_id=args.camera_uuid)
     elif args.camera_uuid:
-        # If camera-uuid is provided, auto-detect camera type from asset
-        # Try to detect camera type by fetching the twin with different asset keys
-        camera_asset = None
-
-        # Try RealSense asset first
+        # Fetch twin by UUID and infer camera type from twin type
         try:
-            camera_twin = cyberwave_client.twin(
-                asset_key="intel/realsensed455", twin_id=args.camera_uuid, name="camera"
+            camera_twin = cyberwave_client.twin(twin_id=args.camera_uuid)
+
+            # Infer camera type from twin type
+            if isinstance(camera_twin, DepthCameraTwin):
+                # DepthCameraTwin -> RealSense
+                camera_type = "realsense"
+                camera_config = _get_default_camera_config("realsense")
+            elif isinstance(camera_twin, CameraTwin):
+                # CameraTwin -> CV2
+                camera_type = "cv2"
+                camera_config = _get_default_camera_config("cv2")
+            else:
+                # Regular Twin - error or default to CV2
+                print(
+                    f"Warning: Twin {args.camera_uuid} is not a camera twin (type: {type(camera_twin).__name__})",
+                    file=sys.stderr,
+                )
+                print("Defaulting to CV2 camera type", file=sys.stderr)
+                camera_type = "cv2"
+                camera_config = _get_default_camera_config("cv2")
+
+            # Use values from detected config
+            camera_id = camera_config.camera_id
+            camera_fps = camera_config.fps
+            camera_resolution = camera_config.get_resolution()
+            enable_depth = camera_config.enable_depth
+            depth_fps = camera_config.depth_fps
+            depth_resolution = camera_config.get_depth_resolution()
+            depth_publish_interval = camera_config.depth_publish_interval
+
+            logger.info(
+                f"Auto-detected camera type '{camera_type}' from twin type '{type(camera_twin).__name__}', using default settings"
             )
-            camera_asset = "intel/realsensed455"
-        except Exception:
-            # Try standard-cam asset
-            try:
-                camera_twin = cyberwave_client.twin(
-                    asset_key="cyberwave/standard-cam", twin_id=args.camera_uuid, name="camera"
-                )
-                camera_asset = "cyberwave/standard-cam"
-            except Exception as e:
-                logger.debug(f"Could not fetch camera twin: {e}")
-                # Fall back to detecting from args.camera_type if available
-                if hasattr(args, "camera_type") and args.camera_type:
-                    if args.camera_type == "realsense":
-                        camera_asset = "intel/realsensed455"
-                    else:
-                        camera_asset = "cyberwave/standard-cam"
-                else:
-                    # Default to standard-cam if we can't determine
-                    camera_asset = "cyberwave/standard-cam"
-                # Create twin with detected/default asset
-                camera_twin = cyberwave_client.twin(
-                    asset_key=camera_asset, twin_id=args.camera_uuid, name="camera"
-                )
-
-        # Auto-detect camera type from asset and use defaults
-        if camera_asset is None:
-            camera_asset = "cyberwave/standard-cam"
-
-        detected_type = _detect_camera_type_from_asset(camera_asset)
-        camera_config = _get_default_camera_config(detected_type)
-
-        camera_type = camera_config.camera_type
-        camera_id = camera_config.camera_id
-        camera_fps = camera_config.fps
-        camera_resolution = camera_config.get_resolution()
-        enable_depth = camera_config.enable_depth
-        depth_fps = camera_config.depth_fps
-        depth_resolution = camera_config.get_depth_resolution()
-        depth_publish_interval = camera_config.depth_publish_interval
-
-        logger.info(
-            f"Auto-detected camera type '{detected_type}' from asset '{camera_asset}', using default settings"
-        )
+        except Exception as e:
+            print(f"Error fetching camera twin {args.camera_uuid}: {e}", file=sys.stderr)
+            sys.exit(1)
 
     robot = cyberwave_client.twin(
         asset_key="the-robot-studio/so101", twin_id=args.twin_uuid, name="robot"
@@ -1833,7 +1838,8 @@ def main():
         # Only configure cameras on the follower if a camera twin is being used
         follower_cameras = None
         if camera_twin is not None:
-            follower_cameras = [camera_id] if isinstance(camera_id, int) else [0]
+            # Support both int (device index) and str (URL) for camera_id
+            follower_cameras = [camera_id]
 
         follower_config = FollowerConfig(
             port=args.follower_port,
