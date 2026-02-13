@@ -2,7 +2,7 @@ name: Build and Push Docker Image to Docker Hub
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -46,6 +46,8 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             # Tag with version from pyproject.toml on main branch push
             type=raw,value=${{ steps.version.outputs.version }},enable=${{ github.ref == 'refs/heads/main' }}
+            # Tag with "dev" on dev branch push
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
             # Tag with semver on version tags (v1.2.3 -> 1.2.3)
             type=semver,pattern={{version}}
             # Short SHA for traceability
