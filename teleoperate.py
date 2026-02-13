@@ -1046,13 +1046,18 @@ def _teleop_loop(
     position_threshold: float,
     velocity_threshold: float,
     effort_threshold: float,
-    frame_time: float,
+    publish_interval: float,
     time_reference: TimeReference,
     status_tracker: Optional[StatusTracker] = None,
     heartbeat_interval: float = 1.0,
+    control_rate_hz: int = 100,
 ) -> tuple[int, int]:
     """
-    Main teleoperation loop: read from leader, send to follower, and send follower data to Cyberwave.
+    Main teleoperation loop: read from leader, send to follower, send data to Cyberwave.
+
+    The loop always runs at control_rate_hz (default 100Hz) to ensure responsive robot
+    control and frequent timestamp updates for camera synchronization. MQTT publishing
+    is rate-limited to publish_interval (1/fps) to avoid flooding the network.
 
     Args:
         leader: SO101Leader instance
@@ -1063,9 +1068,10 @@ def _teleop_loop(
         position_threshold: Minimum change in normalized position to trigger update
         velocity_threshold: Unused (kept for compatibility)
         effort_threshold: Unused (kept for compatibility)
-        frame_time: Target time per frame (1/fps)
+        publish_interval: Minimum interval between MQTT publishes (1/fps)
         time_reference: TimeReference instance
         heartbeat_interval: Interval in seconds to send heartbeat if no changes (default 1.0)
+        control_rate_hz: Control loop frequency in Hz (default 100Hz for SO101)
     Returns:
         Tuple of (update_count, skip_count)
     """
@@ -1075,11 +1081,18 @@ def _teleop_loop(
     # Track last send time per joint for heartbeat
     last_send_times: Dict[str, float] = {}
 
+    # Control loop timing - always run at control_rate_hz for responsive control
+    control_frame_time = 1.0 / control_rate_hz
+
+    # Track last publish time for rate limiting MQTT updates
+    last_publish_time = 0.0
+
     try:
         while not stop_event.is_set():
             loop_start = time.time()
 
             # Generate timestamp for this iteration (before reading action)
+            # This runs at 100Hz to provide fresh timestamps for camera sync
             timestamp, timestamp_monotonic = time_reference.update()
 
             # Read action from leader (for sending to follower)
@@ -1093,24 +1106,7 @@ def _teleop_loop(
                 # Fallback to leader if no follower (shouldn't happen when robot twin is provided)
                 follower_action = leader_action
 
-            # Process Cyberwave updates (queue changed joints from follower)
-            # Worker thread handles all conversion
-            update_count, skip_count = _process_cyberwave_updates(
-                action=follower_action,
-                last_observation=last_observation,
-                action_queue=action_queue,
-                position_threshold=position_threshold,
-                velocity_threshold=velocity_threshold,
-                effort_threshold=effort_threshold,
-                timestamp=timestamp,  # Pass timestamp to processing function
-                status_tracker=status_tracker,
-                last_send_times=last_send_times,
-                heartbeat_interval=heartbeat_interval,
-            )
-            total_update_count += update_count
-            total_skip_count += skip_count
-
-            # Send action to follower if provided
+            # Send action to follower if provided - always do this at control_rate_hz
             if follower is not None and leader is not None:
                 try:
                     # Send leader action to follower (follower handles safety limits and normalization)
@@ -1119,9 +1115,31 @@ def _teleop_loop(
                     if status_tracker:
                         status_tracker.increment_errors()
 
-            # Rate limiting
+            # Rate-limit MQTT publishing to publish_interval
+            # Control runs at 100Hz but we only publish at fps (e.g., 30Hz)
+            current_time = time.time()
+            if current_time - last_publish_time >= publish_interval:
+                # Process Cyberwave updates (queue changed joints from follower)
+                # Worker thread handles all conversion
+                update_count, skip_count = _process_cyberwave_updates(
+                    action=follower_action,
+                    last_observation=last_observation,
+                    action_queue=action_queue,
+                    position_threshold=position_threshold,
+                    velocity_threshold=velocity_threshold,
+                    effort_threshold=effort_threshold,
+                    timestamp=timestamp,  # Pass timestamp to processing function
+                    status_tracker=status_tracker,
+                    last_send_times=last_send_times,
+                    heartbeat_interval=heartbeat_interval,
+                )
+                total_update_count += update_count
+                total_skip_count += skip_count
+                last_publish_time = current_time
+
+            # Rate limiting - maintain control_rate_hz
             elapsed = time.time() - loop_start
-            sleep_time = frame_time - elapsed
+            sleep_time = control_frame_time - elapsed
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
@@ -1162,13 +1180,17 @@ def teleoperate(
     Follower data (actual robot state) is sent to Cyberwave, not leader data.
     Always converts positions to radians.
 
+    The control loop always runs at 100Hz (SO101's max frequency) for responsive robot control
+    and accurate timestamp synchronization with the camera. MQTT publishing is rate-limited
+    to the 'fps' parameter to avoid flooding the network.
+
     Supports both CV2 (USB/webcam/IP) cameras and Intel RealSense cameras.
 
     Args:
         leader: SO101Leader instance (optional if camera_only=True)
         cyberwave_client: Cyberwave client instance (required)
         follower: SO101Follower instance (required when robot twin is provided)
-        fps: Target frames per second for the teleoperation loop
+        fps: MQTT publishing rate in frames per second (control loop runs at 100Hz regardless)
         camera_fps: Frames per second for camera streaming
         position_threshold: Minimum change in position to trigger an update (in normalized units)
         velocity_threshold: Minimum change in velocity to trigger an update
@@ -1359,19 +1381,10 @@ def teleoperate(
     else:
         status_tracker.update_camera_status(detected=False, started=False)
 
-    # TimeReference synchronization: The teleop loop updates TimeReference, and the camera reads from it.
-    # This ensures that when an action is performed, the camera frame is synchronized with that action.
-    # The camera calls time_reference.read() to get the timestamp that was set by the teleop loop.
-    # We require fps >= camera_fps to ensure the teleop loop updates TimeReference at least as fast
-    # as the camera captures frames.
-    if follower is not None and follower.config.cameras and len(follower.config.cameras) > 0:
-        if fps < camera_fps:
-            raise ValueError(
-                f"fps ({fps}) must be >= camera_fps ({camera_fps}) for proper synchronization. "
-                "The teleop loop must update TimeReference at least as fast as the camera captures frames."
-            )
-
-    frame_time = 1.0 / fps
+    # TimeReference synchronization: The teleop loop always runs at 100Hz (control_rate_hz),
+    # updating TimeReference frequently. The camera reads from time_reference to get timestamps.
+    # MQTT publishing is rate-limited to the 'fps' parameter, but control and timestamp updates
+    # run at full speed for accurate synchronization.
     status_tracker.fps = fps
 
     try:
@@ -1431,6 +1444,9 @@ def teleoperate(
         if status_tracker:
             status_tracker.increment_errors()
 
+    # Publish interval for MQTT rate limiting (matches fps parameter)
+    publish_interval = 1.0 / fps
+
     try:
         if leader is not None:
             _teleop_loop(
@@ -1442,7 +1458,7 @@ def teleoperate(
                 position_threshold=position_threshold,
                 velocity_threshold=velocity_threshold,
                 effort_threshold=effort_threshold,
-                frame_time=frame_time,
+                publish_interval=publish_interval,
                 time_reference=time_reference,
                 status_tracker=status_tracker,
             )
