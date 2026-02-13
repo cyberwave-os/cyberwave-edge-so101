@@ -59,7 +59,6 @@ Examples:
         "--find-port",
         action="store_true",
         help="Interactively find the port by disconnecting/reconnecting the device",
-        default=True,
     )
     parser.add_argument(
         "--id",
@@ -105,19 +104,24 @@ Examples:
 
     # Determine port
     port = args.port
-    if args.find_port:
-        if port:
+    
+    # Use find_port if:
+    # 1. --find-port is explicitly set, OR
+    # 2. No port is provided (find_port by default)
+    if args.find_port or not port:
+        if port and args.find_port:
             logger.warning("Both --port and --find-port specified. Using --find-port.")
         try:
             port = find_port()
             logger.info(f"Found port: {port}")
+            # Wait for user to reconnect the USB cable before proceeding
+            print("\nPlease reconnect the USB cable and press Enter when ready to continue.")
+            input()
+            logger.info("Proceeding with calibration...")
         except Exception as e:
             logger.error(f"Error finding port: {e}", exc_info=True)
             sys.exit(1)
-    elif not port:
-        logger.error("Either --port or --find-port must be specified")
-        parser.print_help()
-        sys.exit(1)
+    # If port is provided and find_port is not set, use the provided port directly
 
     # Setup calibration directory
     calibration_dir = None
