@@ -11,11 +11,12 @@ import logging
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from config import FollowerConfig, LeaderConfig
 from follower import SO101Follower
 from leader import SO101Leader
 from utils import find_port, setup_logging
-from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,7 @@ Examples:
 
     # Determine port
     port = args.port
-    
+
     # Use find_port if:
     # 1. --find-port is explicitly set, OR
     # 2. No port is provided (find_port by default)

@@ -43,6 +43,8 @@ from dotenv import load_dotenv
 from follower import SO101Follower
 from motors import MotorNormMode
 from write_position import validate_position
+from pathlib import Path
+from utils import load_calibration
 
 logger = logging.getLogger(__name__)
 
@@ -987,6 +989,10 @@ def remoteoperate(
     if not follower.torque_enabled:
         follower.enable_torque()
 
+    # Upload follower calibration to twin if available
+    if follower.calibration is not None:
+        _upload_calibration_to_twin(follower, robot, "follower")
+
     # Create mapping from joint index (motor ID) to joint name
     joint_index_to_name = {motor.id: name for name, motor in follower.motors.items()}
 
@@ -1161,6 +1167,66 @@ def remoteoperate(
         # Stop status thread
         if status_thread is not None:
             status_thread.join(timeout=1.0)
+
+
+def _upload_calibration_to_twin(
+    follower: SO101Follower,
+    twin: Twin,
+    robot_type: str = "follower",
+) -> None:
+    """
+    Upload calibration data from follower device to Cyberwave twin.
+
+    Args:
+        follower: SO101Follower instance with calibration
+        twin: Twin instance to upload calibration to
+        robot_type: Robot type (default: "follower")
+    """
+    try:
+        # Get calibration path from follower config
+        calibration_path = follower.config.calibration_dir / f"{follower.config.id}.json"
+
+        if not calibration_path.exists():
+            logger.debug(f"No calibration file found at {calibration_path}, skipping upload")
+            return
+
+        # Load calibration file
+        calib_data = load_calibration(calibration_path)
+
+        # Convert calibration format to backend format
+        # Backend expects: joint_calibration dict with JointCalibration objects
+        # Keys should be motor IDs as strings (e.g., "1", "2", "3") not joint names
+        # Note: drive_mode and id must be strings per the schema
+        joint_calibration = {}
+        for joint_name, calib in calib_data.items():
+            # Get motor ID from follower motors mapping
+            if joint_name not in follower.motors:
+                logger.warning(f"Joint '{joint_name}' not found in follower motors, skipping")
+                continue
+
+            motor_id = follower.motors[joint_name].id
+            motor_id_str = str(motor_id)
+
+            joint_calibration[motor_id_str] = {
+                "range_min": calib["range_min"],
+                "range_max": calib["range_max"],
+                "homing_offset": calib["homing_offset"],
+                "drive_mode": str(calib["drive_mode"]),
+                "id": str(calib["id"]),
+            }
+
+        # Upload calibration to twin
+        logger.info(f"Uploading {robot_type} calibration to twin {twin.uuid}...")
+        twin.update_calibration(joint_calibration, robot_type=robot_type)
+        logger.info(f"Calibration uploaded successfully to twin {twin.uuid}")
+    except ImportError:
+        logger.warning(
+            "Cyberwave SDK not installed. Skipping calibration upload. "
+            "Install with: pip install cyberwave"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to upload calibration: {e}")
+        logger.debug("Calibration upload failed, continuing without upload", exc_info=True)
 
 
 def _parse_resolution(resolution_str: str) -> Resolution:

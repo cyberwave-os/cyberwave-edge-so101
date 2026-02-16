@@ -15,13 +15,13 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Optional, Union
 
 from cyberwave import Cyberwave, Twin
-from cyberwave.twin import DepthCameraTwin, CameraTwin
 
 # Import camera configuration and streamers from cyberwave SDK
 from cyberwave.sensor import (
     CV2CameraStreamer,
     Resolution,
 )
+from cyberwave.twin import CameraTwin, DepthCameraTwin
 from cyberwave.utils import TimeReference
 from dotenv import load_dotenv
 
@@ -43,6 +43,7 @@ except ImportError:
 from follower import SO101Follower
 from leader import SO101Leader
 from motors import MotorNormMode
+from utils import load_calibration
 
 logger = logging.getLogger(__name__)
 
@@ -1266,6 +1267,13 @@ def teleoperate(
             raise RuntimeError(
                 "Leader is not calibrated. Please calibrate the leader first using the calibration script."
             )
+        # Upload leader calibration to twin if robot twin is provided
+        if robot is not None:
+            _upload_calibration_to_twin(leader, robot, "leader")
+
+    # Upload follower calibration to twin if available
+    if follower is not None and follower.calibration is not None and robot is not None:
+        _upload_calibration_to_twin(follower, robot, "follower")
 
     # Use follower motors for mappings when sending to Cyberwave (follower data is what we send)
     # Fall back to leader motors if follower not available (for camera-only mode)
@@ -1487,6 +1495,66 @@ def teleoperate(
             status_thread.join(timeout=1.0)
 
 
+def _upload_calibration_to_twin(
+    device: Union[SO101Leader, SO101Follower],
+    twin: Twin,
+    robot_type: str,
+) -> None:
+    """
+    Upload calibration data from device to Cyberwave twin.
+
+    Args:
+        device: SO101Leader or SO101Follower instance with calibration
+        twin: Twin instance to upload calibration to
+        robot_type: Robot type ("leader" or "follower")
+    """
+    try:
+        # Get calibration path from device config
+        calibration_path = device.config.calibration_dir / f"{device.config.id}.json"
+
+        if not calibration_path.exists():
+            logger.debug(f"No calibration file found at {calibration_path}, skipping upload")
+            return
+
+        # Load calibration file
+        calib_data = load_calibration(calibration_path)
+
+        # Convert calibration format to backend format
+        # Backend expects: joint_calibration dict with JointCalibration objects
+        # Keys should be motor IDs as strings (e.g., "1", "2", "3") not joint names
+        # Note: drive_mode and id must be strings per the schema
+        joint_calibration = {}
+        for joint_name, calib in calib_data.items():
+            # Get motor ID from device motors mapping
+            if joint_name not in device.motors:
+                logger.warning(f"Joint '{joint_name}' not found in device motors, skipping")
+                continue
+
+            motor_id = device.motors[joint_name].id
+            motor_id_str = str(motor_id)
+
+            joint_calibration[motor_id_str] = {
+                "range_min": calib["range_min"],
+                "range_max": calib["range_max"],
+                "homing_offset": calib["homing_offset"],
+                "drive_mode": str(calib["drive_mode"]),
+                "id": str(calib["id"]),
+            }
+
+        # Upload calibration to twin
+        logger.info(f"Uploading {robot_type} calibration to twin {twin.uuid}...")
+        twin.update_calibration(joint_calibration, robot_type=robot_type)
+        logger.info(f"Calibration uploaded successfully to twin {twin.uuid}")
+    except ImportError:
+        logger.warning(
+            "Cyberwave SDK not installed. Skipping calibration upload. "
+            "Install with: pip install cyberwave"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to upload calibration: {e}")
+        logger.debug("Calibration upload failed, continuing without upload", exc_info=True)
+
+
 def _parse_resolution(resolution_str: str) -> Resolution:
     """Parse resolution string to Resolution enum.
 
@@ -1646,8 +1714,8 @@ def main():
         "--camera-config",
         type=str,
         default=None,
-        help=f"Path to camera configuration JSON file. If provided, camera settings from the file "
-        f"will be used instead of CLI arguments. Generate with --generate-camera-config.",
+        help="Path to camera configuration JSON file. If provided, camera settings from the file "
+        "will be used instead of CLI arguments. Generate with --generate-camera-config.",
     )
     parser.add_argument(
         "--generate-camera-config",
