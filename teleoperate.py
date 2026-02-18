@@ -12,13 +12,16 @@ import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, Optional, Union
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
 from cyberwave import Cyberwave, Twin
 
-# Import camera configuration and streamers from cyberwave SDK
+# Import camera configuration and stream manager from cyberwave SDK
 from cyberwave.sensor import (
+    CameraStreamManager,
     CV2CameraStreamer,
+    RealSenseStreamer,
     Resolution,
 )
 from cyberwave.twin import CameraTwin, DepthCameraTwin
@@ -30,34 +33,43 @@ try:
     from cyberwave.sensor import (
         RealSenseConfig,
         RealSenseDiscovery,
-        RealSenseStreamer,
     )
 
     _has_realsense = True
 except ImportError:
     _has_realsense = False
-    RealSenseStreamer = None
     RealSenseConfig = None
     RealSenseDiscovery = None
 
+from config import get_setup_config_path
 from follower import SO101Follower
 from leader import SO101Leader
 from motors import MotorNormMode
+from so101_setup import load_setup_config
 from utils import load_calibration
 
 logger = logging.getLogger(__name__)
 
-# Default camera config file path
-DEFAULT_CAMERA_CONFIG_PATH = "camera_config.json"
 
+def _get_sensor_camera_name(twin: Twin, sensor_index: int = 0) -> Optional[str]:
+    """Get camera/sensor name from twin capabilities for multi-stream routing.
 
-# Default camera config directory (same structure as calibration)
-def get_default_camera_config_path() -> str:
-    """Get default camera config path in ~/.cyberwave/so101_lib/camera/camera_config.json"""
-    from pathlib import Path
+    Uses the sensor id from capabilities.sensors when available (e.g. "head_camera",
+    "integrated_camera"). Returns None for single-stream backward compatibility.
 
-    config_dir = Path.home() / ".cyberwave" / "so101_lib" / "camera"
-    return str(config_dir / "camera_config.json")
+    Args:
+        twin: Twin with potential sensor capabilities
+        sensor_index: Index of sensor to use (default: 0)
+
+    Returns:
+        Sensor id string or None
+    """
+    sensors = twin.capabilities.get("sensors", [])
+    if sensors and sensor_index < len(sensors):
+        sensor = sensors[sensor_index]
+        if isinstance(sensor, dict):
+            return sensor.get("id")
+    return None
 
 
 @dataclass
@@ -303,40 +315,6 @@ def _get_default_camera_config(camera_type: str) -> TeleoperateCameraConfig:
         return TeleoperateCameraConfig.create_default_cv2()
 
 
-def generate_camera_config(
-    output_path: str = DEFAULT_CAMERA_CONFIG_PATH,
-    camera_type: str = "cv2",
-    auto_detect: bool = False,
-) -> TeleoperateCameraConfig:
-    """Generate a camera configuration file.
-
-    Args:
-        output_path: Path to save the configuration file
-        camera_type: Camera type ("cv2" or "realsense")
-        auto_detect: Auto-detect RealSense device capabilities
-
-    Returns:
-        Generated TeleoperateCameraConfig
-    """
-    if camera_type == "realsense" and auto_detect:
-        config = TeleoperateCameraConfig.from_realsense_device()
-    elif camera_type == "realsense":
-        config = TeleoperateCameraConfig(
-            camera_type="realsense",
-            fps=30,
-            resolution=[640, 480],
-            enable_depth=True,
-            depth_fps=30,
-            depth_resolution=[640, 480],
-            depth_publish_interval=30,
-        )
-    else:
-        config = TeleoperateCameraConfig.create_default_cv2()
-
-    config.save(output_path)
-    return config
-
-
 class StatusTracker:
     """Thread-safe status tracker for teleoperation system."""
 
@@ -451,6 +429,7 @@ def _camera_worker_thread(
     depth_fps: int = 30,
     depth_resolution: Optional[Resolution] = None,
     depth_publish_interval: int = 30,
+    camera_name: Optional[str] = None,
 ) -> None:
     """
     Worker thread that handles camera streaming.
@@ -474,6 +453,7 @@ def _camera_worker_thread(
         depth_fps: Depth stream FPS for RealSense (default: 30)
         depth_resolution: Depth resolution for RealSense (default: same as color)
         depth_publish_interval: Publish depth every N frames for RealSense (default: 30)
+        camera_name: Optional sensor identifier for multi-stream twins (from capabilities.sensors)
     Returns:
         None
     """
@@ -509,6 +489,7 @@ def _camera_worker_thread(
                 twin_uuid=twin_uuid,
                 time_reference=time_reference,
                 auto_reconnect=True,
+                camera_name=camera_name,
             )
         elif camera_type_lower == "realsense":
             if not _has_realsense:
@@ -532,6 +513,7 @@ def _camera_worker_thread(
                 twin_uuid=twin_uuid,
                 time_reference=time_reference,
                 auto_reconnect=True,
+                camera_name=camera_name,
             )
         else:
             raise ValueError(f"Unsupported camera type: {camera_type}. Use 'cv2' or 'realsense'.")
@@ -1048,6 +1030,9 @@ def _keyboard_input_thread(stop_event: threading.Event) -> None:
             pass
 
 
+CONTROL_RATE_HZ = 100
+
+
 def _teleop_loop(
     leader: SO101Leader,
     follower: Optional[SO101Follower],
@@ -1057,18 +1042,15 @@ def _teleop_loop(
     position_threshold: float,
     velocity_threshold: float,
     effort_threshold: float,
-    publish_interval: float,
     time_reference: TimeReference,
     status_tracker: Optional[StatusTracker] = None,
     heartbeat_interval: float = 1.0,
-    control_rate_hz: int = 100,
+    control_rate_hz: int = CONTROL_RATE_HZ,
 ) -> tuple[int, int]:
     """
     Main teleoperation loop: read from leader, send to follower, send data to Cyberwave.
 
-    The loop always runs at control_rate_hz (default 100Hz) to ensure responsive robot
-    control and frequent timestamp updates for camera synchronization. MQTT publishing
-    is rate-limited to publish_interval (1/fps) to avoid flooding the network.
+    The loop always runs at 100Hz for responsive robot control and MQTT updates.
 
     Args:
         leader: SO101Leader instance
@@ -1079,10 +1061,9 @@ def _teleop_loop(
         position_threshold: Minimum change in normalized position to trigger update
         velocity_threshold: Unused (kept for compatibility)
         effort_threshold: Unused (kept for compatibility)
-        publish_interval: Minimum interval between MQTT publishes (1/fps)
         time_reference: TimeReference instance
         heartbeat_interval: Interval in seconds to send heartbeat if no changes (default 1.0)
-        control_rate_hz: Control loop frequency in Hz (default 100Hz for SO101)
+        control_rate_hz: Control loop frequency in Hz (always 100 for SO101)
     Returns:
         Tuple of (update_count, skip_count)
     """
@@ -1094,9 +1075,6 @@ def _teleop_loop(
 
     # Control loop timing - always run at control_rate_hz for responsive control
     control_frame_time = 1.0 / control_rate_hz
-
-    # Track last publish time for rate limiting MQTT updates
-    last_publish_time = 0.0
 
     try:
         while not stop_event.is_set():
@@ -1126,27 +1104,21 @@ def _teleop_loop(
                     if status_tracker:
                         status_tracker.increment_errors()
 
-            # Rate-limit MQTT publishing to publish_interval
-            # Control runs at 100Hz but we only publish at fps (e.g., 30Hz)
-            current_time = time.time()
-            if current_time - last_publish_time >= publish_interval:
-                # Process Cyberwave updates (queue changed joints from follower)
-                # Worker thread handles all conversion
-                update_count, skip_count = _process_cyberwave_updates(
-                    action=follower_action,
-                    last_observation=last_observation,
-                    action_queue=action_queue,
-                    position_threshold=position_threshold,
-                    velocity_threshold=velocity_threshold,
-                    effort_threshold=effort_threshold,
-                    timestamp=timestamp,  # Pass timestamp to processing function
-                    status_tracker=status_tracker,
-                    last_send_times=last_send_times,
-                    heartbeat_interval=heartbeat_interval,
-                )
-                total_update_count += update_count
-                total_skip_count += skip_count
-                last_publish_time = current_time
+            # Process Cyberwave updates every loop (100Hz)
+            update_count, skip_count = _process_cyberwave_updates(
+                action=follower_action,
+                last_observation=last_observation,
+                action_queue=action_queue,
+                position_threshold=position_threshold,
+                velocity_threshold=velocity_threshold,
+                effort_threshold=effort_threshold,
+                timestamp=timestamp,
+                status_tracker=status_tracker,
+                last_send_times=last_send_times,
+                heartbeat_interval=heartbeat_interval,
+            )
+            total_update_count += update_count
+            total_skip_count += skip_count
 
             # Rate limiting - maintain control_rate_hz
             elapsed = time.time() - loop_start
@@ -1168,13 +1140,13 @@ def teleoperate(
     leader: Optional[SO101Leader],
     cyberwave_client: Optional[Cyberwave] = None,
     follower: Optional[SO101Follower] = None,
-    fps: int = 30,
     camera_fps: int = 30,
     position_threshold: float = 0.1,
     velocity_threshold: float = 100.0,
     effort_threshold: float = 0.1,
     robot: Optional[Twin] = None,
     camera: Optional[Twin] = None,
+    cameras: Optional[List[Dict[str, Any]]] = None,
     camera_type: str = "cv2",
     camera_id: Union[int, str] = 0,
     camera_resolution: Resolution = Resolution.VGA,
@@ -1191,9 +1163,7 @@ def teleoperate(
     Follower data (actual robot state) is sent to Cyberwave, not leader data.
     Always converts positions to radians.
 
-    The control loop always runs at 100Hz (SO101's max frequency) for responsive robot control
-    and accurate timestamp synchronization with the camera. MQTT publishing is rate-limited
-    to the 'fps' parameter to avoid flooding the network.
+    The control loop always runs at 100Hz for responsive robot control and MQTT updates.
 
     Supports both CV2 (USB/webcam/IP) cameras and Intel RealSense cameras.
 
@@ -1201,13 +1171,15 @@ def teleoperate(
         leader: SO101Leader instance (optional if camera_only=True)
         cyberwave_client: Cyberwave client instance (required)
         follower: SO101Follower instance (required when robot twin is provided)
-        fps: MQTT publishing rate in frames per second (control loop runs at 100Hz regardless)
         camera_fps: Frames per second for camera streaming
         position_threshold: Minimum change in position to trigger an update (in normalized units)
         velocity_threshold: Minimum change in velocity to trigger an update
         effort_threshold: Minimum change in effort to trigger an update
         robot: Robot twin instance
-        camera: Camera twin instance
+        camera: Camera twin instance (single camera, backward compat). Ignored if cameras is set.
+        cameras: List of camera configs for multi-stream. Each dict: twin, camera_id, camera_name
+            (optional, from sensor id), camera_type, camera_resolution, enable_depth, etc.
+            Each entry gets its own stream manager to avoid cascading failures.
         camera_type: Camera type - "cv2" for USB/webcam/IP, "realsense" for Intel RealSense
         camera_id: Camera device ID (int) or stream URL (str) for CV2 cameras (default: 0)
         camera_resolution: Video resolution (default: VGA 640x480)
@@ -1221,17 +1193,52 @@ def teleoperate(
     # Disable all logging to avoid interfering with status display
     logging.disable(logging.CRITICAL)
 
+    # Build camera twins for CameraStreamManager (twin + optional overrides)
+    camera_twins: List[Any] = []
+    if cameras is not None:
+        # cameras: list of dicts with "twin" and overrides -> (twin, overrides)
+        for cfg in cameras:
+            twin = cfg["twin"]
+            overrides = {k: v for k, v in cfg.items() if k != "twin"}
+            camera_twins.append((twin, overrides) if overrides else twin)
+    elif camera is not None:
+        actual_camera_id = camera_id
+        if follower is not None and follower.config.cameras and len(follower.config.cameras) > 0:
+            actual_camera_id = follower.config.cameras[0]
+        overrides = {
+            "camera_id": actual_camera_id,
+            "camera_type": camera_type,
+            "camera_resolution": camera_resolution,
+            "enable_depth": enable_depth,
+            "depth_fps": depth_fps,
+            "depth_resolution": depth_resolution,
+            "depth_publish_interval": depth_publish_interval,
+        }
+        camera_twins.append((camera, overrides))
+
     # Create status tracker
     status_tracker = StatusTracker()
     status_tracker.script_started = True
-    status_tracker.camera_enabled = camera is not None
+    status_tracker.camera_enabled = len(camera_twins) > 0
 
-    # Set twin info for status display
+    # Set twin info for status display (use first camera for display)
     robot_uuid = robot.uuid if robot else ""
     robot_name = robot.name if robot and hasattr(robot, "name") else "so101-teleop"
-    camera_uuid_val = camera.uuid if camera else ""
-    camera_name = camera.name if camera and hasattr(camera, "name") else ""
-    status_tracker.set_twin_info(robot_uuid, robot_name, camera_uuid_val, camera_name)
+
+    def _first_twin(twins: List[Any]):
+        if not twins:
+            return None
+        first = twins[0]
+        return first[0] if isinstance(first, tuple) else first
+
+    first_camera_twin = _first_twin(camera_twins)
+    camera_uuid_val = first_camera_twin.uuid if first_camera_twin else ""
+    camera_display_name = (
+        first_camera_twin.name if first_camera_twin and hasattr(first_camera_twin, "name") else ""
+    )
+    if camera_twins and len(camera_twins) > 1:
+        camera_display_name = f"{camera_display_name} (+{len(camera_twins) - 1} more)"
+    status_tracker.set_twin_info(robot_uuid, robot_name, camera_uuid_val, camera_display_name)
 
     # Ensure MQTT client is connected
     if cyberwave_client is None:
@@ -1352,7 +1359,7 @@ def teleoperate(
     # Start status logging thread
     status_thread = threading.Thread(
         target=_status_logging_thread,
-        args=(status_tracker, stop_event, fps, camera_fps, leader, follower),
+        args=(status_tracker, stop_event, CONTROL_RATE_HZ, camera_fps, leader, follower),
         daemon=True,
     )
     status_thread.start()
@@ -1388,42 +1395,52 @@ def teleoperate(
         )
         worker_thread.start()
 
-    # Start camera streaming thread if follower has cameras configured or camera twin is provided
-    camera_thread = None
-    if camera is not None and cyberwave_client is not None:
-        # Determine camera_id from follower config or use provided camera_id
-        actual_camera_id = camera_id
-        if follower is not None and follower.config.cameras and len(follower.config.cameras) > 0:
-            actual_camera_id = follower.config.cameras[0]
-
-        camera_thread = threading.Thread(
-            target=_camera_worker_thread,
-            args=(
-                cyberwave_client,
-                actual_camera_id,
-                camera_fps,
-                camera.uuid,
-                stop_event,
-                time_reference,
-                status_tracker,
-                camera_type,
-                camera_resolution,
-                enable_depth,
-                depth_fps,
-                depth_resolution,
-                depth_publish_interval,
-            ),
-            daemon=True,
+    # Start camera streaming via SDK CameraStreamManager (one stream per twin, each with own thread)
+    camera_manager: Optional[CameraStreamManager] = None
+    if camera_twins and cyberwave_client is not None:
+        # Enrich overrides with camera_id from follower and fps where not set
+        follower_cameras = (
+            follower.config.cameras if follower is not None and follower.config.cameras else []
         )
-        camera_thread.start()
+        enriched_twins: List[Any] = []
+        for idx, item in enumerate(camera_twins):
+            if isinstance(item, tuple):
+                twin, overrides = item
+                overrides = dict(overrides)
+            else:
+                twin = item
+                overrides = {}
+            if "camera_id" not in overrides:
+                overrides["camera_id"] = (
+                    follower_cameras[idx] if idx < len(follower_cameras) else 0
+                )
+            overrides.setdefault("fps", camera_fps)
+            enriched_twins.append((twin, overrides))
+
+        def command_callback(status: str, msg: str):
+            if status_tracker:
+                if "started" in msg.lower() or status == "ok":
+                    status_tracker.update_webrtc_state("streaming")
+                    status_tracker.update_camera_status(detected=True, started=True)
+                elif "stopped" in msg.lower():
+                    status_tracker.update_webrtc_state("idle")
+
+        status_tracker.update_camera_status(detected=True, started=False)
+        status_tracker.update_webrtc_state("idle")
+
+        camera_manager = CameraStreamManager(
+            client=cyberwave_client,
+            twins=enriched_twins,
+            stop_event=stop_event,
+            time_reference=time_reference,
+            command_callback=command_callback,
+        )
+        camera_manager.start()
     else:
         status_tracker.update_camera_status(detected=False, started=False)
 
-    # TimeReference synchronization: The teleop loop always runs at 100Hz (control_rate_hz),
-    # updating TimeReference frequently. The camera reads from time_reference to get timestamps.
-    # MQTT publishing is rate-limited to the 'fps' parameter, but control and timestamp updates
-    # run at full speed for accurate synchronization.
-    status_tracker.fps = fps
+    # TimeReference synchronization: teleop loop runs at 100Hz for control and MQTT updates.
+    status_tracker.fps = CONTROL_RATE_HZ
 
     try:
         if (
@@ -1481,15 +1498,12 @@ def teleoperate(
             mqtt_client.publish_initial_observation(
                 twin_uuid=robot.uuid,
                 observations=observations,
-                fps=fps
+                fps=CONTROL_RATE_HZ,
             )
 
     except Exception:
         if status_tracker:
             status_tracker.increment_errors()
-
-    # Publish interval for MQTT rate limiting (matches fps parameter)
-    publish_interval = 1.0 / fps
 
     try:
         if leader is not None:
@@ -1502,7 +1516,6 @@ def teleoperate(
                 position_threshold=position_threshold,
                 velocity_threshold=velocity_threshold,
                 effort_threshold=effort_threshold,
-                publish_interval=publish_interval,
                 time_reference=time_reference,
                 status_tracker=status_tracker,
             )
@@ -1522,8 +1535,8 @@ def teleoperate(
                 pass
             worker_thread.join(timeout=1.0)
 
-        if camera_thread is not None:
-            camera_thread.join(timeout=5.0)
+        if camera_manager is not None:
+            camera_manager.join(timeout=5.0)
 
         if status_thread is not None:
             status_thread.join(timeout=1.0)
@@ -1645,99 +1658,20 @@ def main():
     parser.add_argument(
         "--twin-uuid",
         type=str,
-        required=False,
         default=os.getenv("CYBERWAVE_TWIN_UUID"),
-        help="UUID of the twin to update",
+        help="SO101 twin UUID (override from setup.json)",
     )
     parser.add_argument(
         "--leader-port",
         type=str,
-        required=False,
         default=os.getenv("CYBERWAVE_METADATA_LEADER_PORT"),
-        help="Serial port for leader device (optional, will try to find if not provided). "
-        "Not required when using --camera-only.",
+        help="Leader serial port (override from setup.json)",
     )
     parser.add_argument(
         "--follower-port",
         type=str,
         default=os.getenv("CYBERWAVE_METADATA_FOLLOWER_PORT"),
-        help="Serial port for follower device (optional)",
-    )
-    parser.add_argument(
-        "--fps",
-        type=int,
-        default=30,
-        help="Target frames per second (default: 30)",
-    )
-    parser.add_argument(
-        "--max-relative-target",
-        type=float,
-        default=None,
-        help="Maximum change per update for follower (raw encoder units, default: None = no limit). "
-        "Set to a value to enable safety limit (e.g., 50.0 for slower/safer movement).",
-    )
-    parser.add_argument(
-        "--camera-only",
-        action="store_true",
-        help="Only stream camera (skip teleoperation loop). Requires --follower-port.",
-    )
-    parser.add_argument(
-        "--camera-uuid",
-        type=str,
-        required=False,
-        default=os.getenv("CYBERWAVE_METADATA_CAMERA_TWIN_UUID"),
-        help="UUID of the twin to stream camera to (default: same as --twin-uuid)",
-    )
-    parser.add_argument(
-        "--camera-fps",
-        type=int,
-        required=False,
-        default=30,
-        help="FPS to use for the camera (default: 30)",
-    )
-    parser.add_argument(
-        "--camera-type",
-        type=str,
-        choices=["cv2", "realsense"],
-        default=os.getenv("CYBERWAVE_METADATA_CAMERA_TYPE", "cv2"),
-        help="Camera type: 'cv2' for USB/webcam/IP cameras, 'realsense' for Intel RealSense (default: 'cv2')",
-    )
-    parser.add_argument(
-        "--camera-id",
-        type=str,
-        default="0",
-        help="Camera device ID (integer) or stream URL (string) for CV2 cameras. "
-        "Examples: '0' for first USB camera, 'rtsp://192.168.1.100:554/stream' for RTSP (default: '0')",
-    )
-    parser.add_argument(
-        "--camera-resolution",
-        type=str,
-        default=os.getenv("CYBERWAVE_METADATA_CAMERA_RESOLUTION", "VGA"),
-        help="Camera resolution: QVGA (320x240), VGA (640x480), SVGA (800x600), HD (1280x720), "
-        "FULL_HD (1920x1080), or WIDTHxHEIGHT format (default: VGA)",
-    )
-    parser.add_argument(
-        "--enable-depth",
-        action="store_true",
-        help="Enable depth streaming for RealSense cameras",
-    )
-    parser.add_argument(
-        "--depth-fps",
-        type=int,
-        default=30,
-        help="Depth stream FPS for RealSense cameras (default: 30)",
-    )
-    parser.add_argument(
-        "--depth-resolution",
-        type=str,
-        default=None,
-        help="Depth stream resolution for RealSense cameras (default: same as --camera-resolution)",
-    )
-    parser.add_argument(
-        "--depth-publish-interval",
-        type=int,
-        default=30,
-        help="Publish depth frame every N frames for RealSense cameras (default: 30)",
+        help="Follower serial port (override from setup.json)",
     )
     parser.add_argument(
         "--list-realsense",
@@ -1745,49 +1679,13 @@ def main():
         help="List available RealSense devices and exit",
     )
     parser.add_argument(
-        "--camera-config",
+        "--setup-path",
         type=str,
         default=None,
-        help="Path to camera configuration JSON file. If provided, camera settings from the file "
-        "will be used instead of CLI arguments. Generate with --generate-camera-config.",
-    )
-    parser.add_argument(
-        "--generate-camera-config",
-        type=str,
-        nargs="?",
-        const=DEFAULT_CAMERA_CONFIG_PATH,
-        metavar="PATH",
-        help=f"Generate a camera configuration file and exit. "
-        f"Optionally specify output path (default: {DEFAULT_CAMERA_CONFIG_PATH}). "
-        f"Use with --camera-type to specify camera type, --auto-detect for RealSense auto-detection.",
-    )
-    parser.add_argument(
-        "--auto-detect",
-        action="store_true",
-        help="Auto-detect RealSense device capabilities when generating config (use with --generate-camera-config)",
+        help="Path to setup.json (default: ~/.cyberwave/so101_lib/setup.json)",
     )
 
     args = parser.parse_args()
-
-    # Handle --generate-camera-config
-    if args.generate_camera_config:
-        output_path = args.generate_camera_config
-        print(f"Generating camera configuration file: {output_path}")
-
-        try:
-            config = generate_camera_config(
-                output_path=output_path,
-                camera_type=args.camera_type,
-                auto_detect=args.auto_detect,
-            )
-            print(f"Configuration saved to: {output_path}")
-            print(f"Config: {config}")
-            print("\nYou can now use this config with:")
-            print(f"  python teleoperate.py --camera-config {output_path} ...")
-        except Exception as e:
-            print(f"Error generating config: {e}")
-            sys.exit(1)
-        sys.exit(0)
 
     # Handle --list-realsense
     if args.list_realsense:
@@ -1819,128 +1717,137 @@ def main():
                 print()
         sys.exit(0)
 
-    # Validate: --camera-only requires --camera-uuid
-    if args.camera_only and not args.camera_uuid:
-        print("Error: --camera-uuid is required when using --camera-only")
-        sys.exit(1)
-
     # Initialize Cyberwave client
     cyberwave_client = Cyberwave()
 
-    # Camera setup is optional - only configure when explicitly requested
-    # via --camera-uuid or --camera-config. Camera streaming is being moved
-    # to a separate codebase; this support is kept for backwards compatibility.
-    camera_config: Optional[TeleoperateCameraConfig] = None
     camera_twin = None
+    cameras_list: List[Dict[str, Any]] = []
+    setup_config: Dict[str, Any] = {}
 
-    # Default camera values (only used when a camera twin is configured)
-    camera_type = args.camera_type
-    camera_fps = args.camera_fps
-    enable_depth = args.enable_depth
-    depth_fps = args.depth_fps
-    depth_publish_interval = args.depth_publish_interval
-    camera_id: Union[int, str] = args.camera_id
-    try:
-        camera_id = int(args.camera_id)
-    except ValueError:
-        pass  # Keep as string (URL)
-    camera_resolution = _parse_resolution(args.camera_resolution)
-    depth_resolution = _parse_resolution(args.depth_resolution) if args.depth_resolution else None
+    # Load setup.json by default when it exists (used for cameras, twin_uuid, ports)
+    setup_path = Path(args.setup_path) if args.setup_path else get_setup_config_path()
+    if setup_path.exists():
+        setup_config = load_setup_config(setup_path)
+        if setup_config:
+            print(f"Loaded setup from: {setup_path}")
 
-    # Check for camera config file in default location first (like calibration)
-    default_camera_config_path = get_default_camera_config_path()
-    camera_config_file_to_load = None
+    # All camera/teleop config comes from setup.json (so101-setup)
+    camera_only = setup_config.get("camera_only", False)
+    max_relative_target = setup_config.get("max_relative_target")
 
-    if args.camera_config:
-        # Explicit config file provided (highest priority)
-        camera_config_file_to_load = args.camera_config
-    elif os.path.exists(default_camera_config_path):
-        # Check default location (~/.cyberwave/so101_lib/camera/camera_config.json)
-        camera_config_file_to_load = default_camera_config_path
-
-    if camera_config_file_to_load:
-        # Load from JSON file
-        if not os.path.exists(camera_config_file_to_load):
-            print(f"Error: Camera config file not found: {camera_config_file_to_load}")
+    # Validate: camera-only requires setup with cameras
+    if camera_only:
+        has_setup_cameras = setup_config.get("wrist_camera") or len(
+            setup_config.get("additional_cameras", [])
+        ) > 0
+        if not has_setup_cameras:
             print(
-                f"Generate one with: python teleoperate.py --generate-camera-config {camera_config_file_to_load}"
+                "Error: camera_only in setup requires wrist_camera or additional_cameras. "
+                "Run so101-setup with --wrist-camera or --additional-camera."
             )
             sys.exit(1)
 
-        try:
-            camera_config = TeleoperateCameraConfig.load(camera_config_file_to_load)
-            print(f"Loaded camera config from: {camera_config_file_to_load}")
-            print(f"Config: {camera_config}")
-        except Exception as e:
-            print(f"Error loading camera config: {e}")
-            sys.exit(1)
+    # Default camera values (used when cameras_list is empty - no camera streaming)
+    camera_type = "cv2"
+    camera_fps = setup_config.get("camera_fps", 30)
+    enable_depth = False
+    depth_fps = 30
+    depth_publish_interval = 30
+    camera_id: Union[int, str] = 0
+    camera_resolution = Resolution.VGA
+    depth_resolution = None
 
-        # Use values from config file
-        camera_type = camera_config.camera_type
-        camera_id = camera_config.camera_id
-        camera_fps = camera_config.fps
-        camera_resolution = camera_config.get_resolution()
-        enable_depth = camera_config.enable_depth
-        depth_fps = camera_config.depth_fps
-        depth_resolution = camera_config.get_depth_resolution()
-        depth_publish_interval = camera_config.depth_publish_interval
+    # Use setup for cameras (always from setup)
+    if setup_config:
+        cameras_list = []
 
-        # Create camera twin if camera-uuid is also provided
-        if args.camera_uuid:
-            camera_twin = cyberwave_client.twin(twin_id=args.camera_uuid)
-    elif args.camera_uuid:
-        # Fetch twin by UUID and infer camera type from twin type
-        try:
-            camera_twin = cyberwave_client.twin(twin_id=args.camera_uuid)
+        if setup_config.get("wrist_camera"):
+            uuid = setup_config.get("wrist_camera_twin_uuid")
+            if not uuid:
+                print("Error: wrist_camera_twin_uuid missing in setup config")
+                sys.exit(1)
+            twin = cyberwave_client.twin(twin_id=uuid)
+            wrist_fps = setup_config.get("camera_fps", 30)
+            cameras_list.append({
+                "twin": twin,
+                "camera_id": setup_config.get("wrist_camera_id", 0),
+                "camera_type": "cv2",
+                "camera_resolution": Resolution.VGA,
+                "camera_name": setup_config.get("wrist_camera_name", "wrist_camera"),
+                "fps": wrist_fps,
+                "enable_depth": False,
+                "depth_fps": 30,
+                "depth_resolution": None,
+                "depth_publish_interval": 30,
+            })
 
-            # Infer camera type from twin type
-            if isinstance(camera_twin, DepthCameraTwin):
-                # DepthCameraTwin -> RealSense
-                camera_type = "realsense"
-                camera_config = _get_default_camera_config("realsense")
-            elif isinstance(camera_twin, CameraTwin):
-                # CameraTwin -> CV2
-                camera_type = "cv2"
-                camera_config = _get_default_camera_config("cv2")
-            else:
-                # Regular Twin - error or default to CV2
-                print(
-                    f"Warning: Twin {args.camera_uuid} is not a camera twin (type: {type(camera_twin).__name__})",
-                    file=sys.stderr,
-                )
-                print("Defaulting to CV2 camera type", file=sys.stderr)
-                camera_type = "cv2"
-                camera_config = _get_default_camera_config("cv2")
+        for add in setup_config.get("additional_cameras", []):
+            uuid = add.get("twin_uuid")
+            if not uuid:
+                print("Error: twin_uuid missing in additional_cameras entry")
+                sys.exit(1)
+            twin = cyberwave_client.twin(twin_id=uuid)
+            res = add.get("resolution", [640, 480])
+            cam_res = Resolution.from_size(res[0], res[1]) if len(res) >= 2 else Resolution.VGA
+            if cam_res is None:
+                cam_res = Resolution.closest(res[0], res[1]) if len(res) >= 2 else Resolution.VGA
+            depth_res = add.get("depth_resolution")
+            depth_res_enum = None
+            if depth_res and len(depth_res) >= 2:
+                depth_res_enum = Resolution.from_size(depth_res[0], depth_res[1]) or Resolution.closest(depth_res[0], depth_res[1])
+            cameras_list.append({
+                "twin": twin,
+                "camera_id": add.get("camera_id", 1),
+                "camera_type": add.get("camera_type", "cv2"),
+                "camera_resolution": cam_res,
+                "camera_name": add.get("camera_name", "external"),
+                "fps": add.get("fps", 30),
+                "enable_depth": add.get("enable_depth", False),
+                "depth_fps": add.get("depth_fps", 30),
+                "depth_resolution": depth_res_enum,
+                "depth_publish_interval": add.get("depth_publish_interval", 30),
+            })
 
-            # Use values from detected config
-            camera_id = camera_config.camera_id
-            camera_fps = camera_config.fps
-            camera_resolution = camera_config.get_resolution()
-            enable_depth = camera_config.enable_depth
-            depth_fps = camera_config.depth_fps
-            depth_resolution = camera_config.get_depth_resolution()
-            depth_publish_interval = camera_config.depth_publish_interval
+        if cameras_list:
+            camera_twin = cameras_list[0]["twin"]
+            camera_fps = cameras_list[0].get("fps", 30)
 
-            logger.info(
-                f"Auto-detected camera type '{camera_type}' from twin type '{type(camera_twin).__name__}', using default settings"
-            )
-        except Exception as e:
-            print(f"Error fetching camera twin {args.camera_uuid}: {e}", file=sys.stderr)
-            sys.exit(1)
+    # Resolve twin UUID and ports: CLI/env > setup.json (so teleoperate works with no args when setup exists)
+    effective_twin_uuid = args.twin_uuid or setup_config.get("twin_uuid") or setup_config.get(
+        "wrist_camera_twin_uuid"
+    )
+    effective_leader_port = args.leader_port or setup_config.get("leader_port")
+    effective_follower_port = args.follower_port or setup_config.get("follower_port")
+    if not effective_twin_uuid:
+        print(
+            "Error: Twin UUID required. Use --twin-uuid, set CYBERWAVE_TWIN_UUID, "
+            "or run so101-setup with --twin-uuid"
+        )
+        sys.exit(1)
+
+    # Follower required for teleop (sends data to Cyberwave) or camera-only (streaming)
+    if not effective_follower_port and (not camera_only or cameras_list):
+        print(
+            "Error: Follower port required. Calibrate follower first (so101-calibrate) to save port, "
+            "or pass --follower-port / set CYBERWAVE_METADATA_FOLLOWER_PORT"
+        )
+        sys.exit(1)
 
     robot = cyberwave_client.twin(
-        asset_key="the-robot-studio/so101", twin_id=args.twin_uuid, name="robot"
+        asset_key="the-robot-studio/so101", twin_id=effective_twin_uuid, name="robot"
     )
-    camera = camera_twin
+    # Pass cameras list when we have configs (single or multi), else single camera for backward compat
+    camera = camera_twin if not cameras_list else None
+    cameras = cameras_list if cameras_list else None
     mqtt_client = cyberwave_client.mqtt
 
     # Initialize leader (optional if camera-only mode)
     leader = None
-    if not args.camera_only:
+    if not camera_only:
         from config import LeaderConfig
         from utils import find_port
 
-        leader_port = args.leader_port
+        leader_port = effective_leader_port
         if not leader_port:
             leader_port = find_port(device_name="SO101 Leader")
 
@@ -1950,20 +1857,23 @@ def main():
 
     # Initialize follower (required for camera-only mode, optional otherwise)
     follower = None
-    if args.follower_port or args.camera_only:
-        if not args.follower_port:
-            raise RuntimeError("--follower-port is required when using --camera-only")
+    if effective_follower_port or camera_only:
+        if not effective_follower_port:
+            raise RuntimeError(
+                "--follower-port is required when using --camera-only. "
+                "Calibrate the follower first (so101-calibrate) or pass --follower-port."
+            )
         from config import FollowerConfig
 
-        # Only configure cameras on the follower if a camera twin is being used
+        # Only configure cameras on the follower if camera(s) are being used
         follower_cameras = None
-        if camera_twin is not None:
+        if cameras_list:
             # Support both int (device index) and str (URL) for camera_id
-            follower_cameras = [camera_id]
+            follower_cameras = [cfg["camera_id"] for cfg in cameras_list]
 
         follower_config = FollowerConfig(
-            port=args.follower_port,
-            max_relative_target=args.max_relative_target,
+            port=effective_follower_port,
+            max_relative_target=max_relative_target,
             cameras=follower_cameras,
         )
         follower = SO101Follower(config=follower_config)
@@ -1974,10 +1884,10 @@ def main():
             leader=leader,
             cyberwave_client=cyberwave_client,
             follower=follower,
-            fps=args.fps,
             camera_fps=camera_fps,
             robot=robot,
             camera=camera,
+            cameras=cameras,
             camera_type=camera_type,
             camera_id=camera_id,
             camera_resolution=camera_resolution,

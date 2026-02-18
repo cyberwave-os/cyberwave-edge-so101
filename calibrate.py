@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from config import FollowerConfig, LeaderConfig
 from follower import SO101Follower
 from leader import SO101Leader
+from so101_setup import update_setup_port
 from utils import find_port, setup_logging
 
 logger = logging.getLogger(__name__)
@@ -195,6 +196,14 @@ Examples:
         # Disconnect
         logger.info("Disconnecting from device...")
         device.disconnect()
+
+        # Save port to setup.json for teleoperate --setup
+        try:
+            update_setup_port(args.type, port)
+            logger.info(f"Saved {args.type}_port to setup.json")
+        except Exception as e:
+            logger.warning(f"Could not save port to setup: {e}")
+
         logger.info("Calibration completed successfully!")
 
     except KeyboardInterrupt:

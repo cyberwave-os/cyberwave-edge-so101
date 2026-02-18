@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=61.0,<81", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -49,6 +49,7 @@ dev = [
 so101-find-port = "find_port:main"
 so101-read-device = "read_device:main"
 so101-calibrate = "calibrate:main"
+so101-setup = "so101_setup:main"
 so101-teleoperate = "teleoperate:main"
 so101-write-position = "write_position:main"
 so101-remoteoperate = "remoteoperate:main"
