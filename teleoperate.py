@@ -325,10 +325,8 @@ class StatusTracker:
         self.script_started = False
         self.mqtt_connected = False
         self.camera_enabled = False  # Whether camera streaming was configured at all
-        self.camera_detected = False
-        self.camera_started = False
-        # WebRTC states: "idle" (red), "connecting" (yellow), "streaming" (green)
-        self.webrtc_state = "idle"
+        # Per-camera: camera_name -> {detected, started, webrtc_state}
+        self.camera_states: Dict[str, Dict[str, Any]] = {}
         self.fps = 0
         self.camera_fps = 0
         self.messages_produced = 0
@@ -341,22 +339,46 @@ class StatusTracker:
         self.joint_index_to_name: Dict[str, str] = {}
         self.robot_uuid: str = ""
         self.robot_name: str = ""
-        self.camera_uuid: str = ""
-        self.camera_name: str = ""
+        self.camera_infos: List[Dict[str, str]] = []  # [{uuid, name}, ...] per camera
 
     def update_mqtt_status(self, connected: bool):
         with self.lock:
             self.mqtt_connected = connected
 
-    def update_camera_status(self, detected: bool, started: bool = False):
+    def set_camera_infos(self, infos: List[Dict[str, str]]) -> None:
+        """Set camera info list and initialize per-camera states."""
         with self.lock:
-            self.camera_detected = detected
-            self.camera_started = started
+            self.camera_infos = list(infos)
+            for info in infos:
+                name = info.get("name", "default")
+                if name not in self.camera_states:
+                    self.camera_states[name] = {
+                        "detected": False,
+                        "started": False,
+                        "webrtc_state": "idle",
+                    }
 
-    def update_webrtc_state(self, state: str):
-        """Update WebRTC state: 'idle', 'connecting', or 'streaming'."""
+    def update_camera_status(self, camera_name: str, detected: bool, started: bool = False):
         with self.lock:
-            self.webrtc_state = state
+            if camera_name not in self.camera_states:
+                self.camera_states[camera_name] = {
+                    "detected": False,
+                    "started": False,
+                    "webrtc_state": "idle",
+                }
+            self.camera_states[camera_name]["detected"] = detected
+            self.camera_states[camera_name]["started"] = started
+
+    def update_webrtc_state(self, camera_name: str, state: str):
+        """Update WebRTC state for a camera: 'idle', 'connecting', or 'streaming'."""
+        with self.lock:
+            if camera_name not in self.camera_states:
+                self.camera_states[camera_name] = {
+                    "detected": False,
+                    "started": False,
+                    "webrtc_state": "idle",
+                }
+            self.camera_states[camera_name]["webrtc_state"] = state
 
     def increment_produced(self):
         with self.lock:
@@ -386,12 +408,12 @@ class StatusTracker:
             self.joint_index_to_name = mapping.copy()
 
     def set_twin_info(self, robot_uuid: str, robot_name: str, camera_uuid: str, camera_name: str):
-        """Set twin information for display."""
+        """Set twin information for display (legacy single-camera)."""
         with self.lock:
             self.robot_uuid = robot_uuid
             self.robot_name = robot_name
-            self.camera_uuid = camera_uuid
-            self.camera_name = camera_name
+            if not self.camera_infos:
+                self.camera_infos = [{"uuid": camera_uuid, "name": camera_name}]
 
     def get_status(self) -> Dict:
         """Get a snapshot of current status."""
@@ -400,9 +422,8 @@ class StatusTracker:
                 "script_started": self.script_started,
                 "mqtt_connected": self.mqtt_connected,
                 "camera_enabled": self.camera_enabled,
-                "camera_detected": self.camera_detected,
-                "camera_started": self.camera_started,
-                "webrtc_state": self.webrtc_state,
+                "camera_states": {k: dict(v) for k, v in self.camera_states.items()},
+                "camera_infos": list(self.camera_infos),
                 "fps": self.fps,
                 "camera_fps": self.camera_fps,
                 "messages_produced": self.messages_produced,
@@ -412,8 +433,6 @@ class StatusTracker:
                 "joint_temperatures": self.joint_temperatures.copy(),
                 "robot_uuid": self.robot_uuid,
                 "robot_name": self.robot_name,
-                "camera_uuid": self.camera_uuid,
-                "camera_name": self.camera_name,
             }
 
 
@@ -909,8 +928,22 @@ def _status_logging_thread(
             robot_name = status["robot_name"] or "N/A"
             lines.append(f"Robot:  {robot_name} ({status['robot_uuid']})"[:70].ljust(70))
             if status["camera_enabled"]:
-                camera_name = status["camera_name"] or "N/A"
-                lines.append(f"Camera: {camera_name} ({status['camera_uuid']})"[:70].ljust(70))
+                camera_infos = status.get("camera_infos", [])
+                camera_states = status.get("camera_states", {})
+                for info in camera_infos:
+                    cam_name = info.get("name", "default")
+                    cam_uuid = info.get("uuid", "")[:8]
+                    state = camera_states.get(cam_name, {})
+                    detected = state.get("detected", False)
+                    started = state.get("started", False)
+                    webrtc = state.get("webrtc_state", "idle")
+                    cam_icon = "🟢" if (detected and started) else ("🟡" if detected else "🔴")
+                    webrtc_icon = (
+                        "🟢" if webrtc == "streaming" else ("🟡" if webrtc == "connecting" else "🔴")
+                    )
+                    lines.append(
+                        f"  {cam_name}: Cam{cam_icon} WebRTC{webrtc_icon} ({cam_uuid}...)"[:70].ljust(70)
+                    )
             else:
                 lines.append("Camera: not configured".ljust(70))
             lines.append("-" * 70)
@@ -918,30 +951,7 @@ def _status_logging_thread(
             # Status indicators
             script_icon = "🟢" if status["script_started"] else "🟡"
             mqtt_icon = "🟢" if status["mqtt_connected"] else "🔴"
-            if not status["camera_enabled"]:
-                camera_icon = "⚫"  # Not configured
-                webrtc_icon = "⚫"
-            else:
-                if not status["camera_detected"]:
-                    camera_icon = "🔴"
-                elif not status["camera_started"]:
-                    camera_icon = "🟡"
-                else:
-                    camera_icon = "🟢"
-                # WebRTC: idle=red, connecting=yellow, streaming=green
-                webrtc_state = status["webrtc_state"]
-                if webrtc_state == "streaming":
-                    webrtc_icon = "🟢"
-                elif webrtc_state == "connecting":
-                    webrtc_icon = "🟡"
-                else:
-                    webrtc_icon = "🔴"
-
-            lines.append(
-                f"Script:{script_icon} MQTT:{mqtt_icon} Camera:{camera_icon} WebRTC:{webrtc_icon}".ljust(
-                    70
-                )
-            )
+            lines.append(f"Script:{script_icon} MQTT:{mqtt_icon}".ljust(70))
             lines.append("-" * 70)
 
             # Statistics
@@ -1238,8 +1248,6 @@ def teleoperate(
     camera_display_name = (
         first_camera_twin.name if first_camera_twin and hasattr(first_camera_twin, "name") else ""
     )
-    if camera_twins and len(camera_twins) > 1:
-        camera_display_name = f"{camera_display_name} (+{len(camera_twins) - 1} more)"
     status_tracker.set_twin_info(robot_uuid, robot_name, camera_uuid_val, camera_display_name)
 
     # Ensure MQTT client is connected
@@ -1419,16 +1427,36 @@ def teleoperate(
             overrides.setdefault("fps", camera_fps)
             enriched_twins.append((twin, overrides))
 
-        def command_callback(status: str, msg: str):
+        # Build camera infos for per-camera status display
+        camera_infos = []
+        for item in enriched_twins:
+            if isinstance(item, tuple):
+                twin, overrides = item
+            else:
+                twin, overrides = item, {}
+            cam_name = overrides.get("camera_name")
+            if not cam_name:
+                sensors = getattr(twin, "capabilities", {}).get("sensors", [])
+                cam_name = (
+                    sensors[0].get("id", "default")
+                    if sensors and isinstance(sensors[0], dict)
+                    else "default"
+                )
+            camera_infos.append({"uuid": str(twin.uuid), "name": cam_name})
+        status_tracker.set_camera_infos(camera_infos)
+
+        def command_callback(status: str, msg: str, camera_name: str = "default"):
             if status_tracker:
                 if "started" in msg.lower() or status == "ok":
-                    status_tracker.update_webrtc_state("streaming")
-                    status_tracker.update_camera_status(detected=True, started=True)
+                    status_tracker.update_webrtc_state(camera_name, "streaming")
+                    status_tracker.update_camera_status(camera_name, detected=True, started=True)
                 elif "stopped" in msg.lower():
-                    status_tracker.update_webrtc_state("idle")
+                    status_tracker.update_webrtc_state(camera_name, "idle")
 
-        status_tracker.update_camera_status(detected=True, started=False)
-        status_tracker.update_webrtc_state("idle")
+        for info in camera_infos:
+            cam_name = info["name"]
+            status_tracker.update_camera_status(cam_name, detected=True, started=False)
+            status_tracker.update_webrtc_state(cam_name, "idle")
 
         camera_manager = CameraStreamManager(
             client=cyberwave_client,
@@ -1439,7 +1467,7 @@ def teleoperate(
         )
         camera_manager.start()
     else:
-        status_tracker.update_camera_status(detected=False, started=False)
+        status_tracker.camera_states.clear()
 
     # TimeReference synchronization: teleop loop runs at 100Hz for control and MQTT updates.
     status_tracker.fps = CONTROL_RATE_HZ
