@@ -601,6 +601,7 @@ def cyberwave_update_worker(
     time_reference: TimeReference = None,
     status_tracker: Optional[StatusTracker] = None,
     follower_calibration: Optional[Dict[str, Any]] = None,
+    motor_id_to_schema_joint: Optional[Dict[int, str]] = None,
 ) -> None:
     """
     Worker thread that processes actions from the queue and updates Cyberwave twin.
@@ -608,6 +609,8 @@ def cyberwave_update_worker(
     Batches multiple joint updates together and skips updates where position is 0.0.
     Velocity and effort are hardcoded to 0.0 to avoid issues.
     Always converts positions to radians.
+    Uses schema joint names (e.g. "_1", "_2") for MQTT updates, matching the twin's
+    universal schema.
 
     Args:
         action_queue: Queue containing (joint_name, action_data) tuples where action_data
@@ -618,6 +621,8 @@ def cyberwave_update_worker(
         twin: Optional Twin instance for updating joint states
         time_reference: TimeReference instance
         status_tracker: Optional status tracker for statistics
+        follower_calibration: Calibration data for converting normalized positions
+        motor_id_to_schema_joint: Mapping from motor ID to schema joint name (e.g. 1 -> "_1")
     Returns:
         None
     """
@@ -696,11 +701,16 @@ def cyberwave_update_worker(
             # Send batched updates
             if batch_updates:
                 try:
-                    # Send all joints in the batch
+                    # Send all joints in the batch using schema joint names (e.g. "_1", "_2")
                     joint_states = {}
                     for joint_index, (position, _, _, timestamp) in batch_updates.items():
+                        schema_joint = (
+                            motor_id_to_schema_joint.get(joint_index, str(joint_index))
+                            if motor_id_to_schema_joint
+                            else str(joint_index)
+                        )
                         twin.joints.set(
-                            joint_name=str(joint_index),
+                            joint_name=schema_joint,
                             position=position,
                             degrees=False,
                             timestamp=timestamp,
@@ -1281,6 +1291,25 @@ def teleoperate(
         follower.motors if follower is not None else (leader.motors if leader is not None else {})
     )
 
+    # Build motor_id -> schema joint name mapping from twin's universal schema
+    # Schema uses names like "_1", "_2" (SO101); matches backend get_controllable_joints
+    motor_id_to_schema_joint: Dict[int, str] = {}
+    if robot is not None and motors_for_mapping:
+        try:
+            schema_joint_names = robot.get_controllable_joint_names()
+            for _, motor in motors_for_mapping.items():
+                motor_id = motor.id
+                idx = motor_id - 1  # 0-based index
+                if idx < len(schema_joint_names):
+                    motor_id_to_schema_joint[motor_id] = schema_joint_names[idx]
+                else:
+                    motor_id_to_schema_joint[motor_id] = f"_{motor_id}"  # fallback
+        except Exception:
+            # Fallback to _n naming if schema fetch fails
+            motor_id_to_schema_joint = {
+                motor.id: f"_{motor.id}" for _, motor in motors_for_mapping.items()
+            }
+
     if motors_for_mapping:
         # Create mapping from joint names to joint indexes (motor IDs: 1-6)
         joint_name_to_index = {name: motor.id for name, motor in motors_for_mapping.items()}
@@ -1353,6 +1382,7 @@ def teleoperate(
                 time_reference,
                 status_tracker,
                 follower_calibration,
+                motor_id_to_schema_joint,
             ),
             daemon=True,
         )
@@ -1441,7 +1471,11 @@ def teleoperate(
                             radians = degrees * math.pi / 180.0
                         else:
                             radians = normalized_pos * math.pi / 180.0
-                    observations[joint_index] = radians
+                    # Use schema joint name (e.g. "_1", "_2") for MQTT
+                    schema_joint = motor_id_to_schema_joint.get(
+                        joint_index, f"_{joint_index}"
+                    )
+                    observations[schema_joint] = radians
             # Send follower observations to Cyberwave as single update
             # together with the desired actual frequency
             mqtt_client.publish_initial_observation(
