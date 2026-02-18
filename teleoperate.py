@@ -1447,16 +1447,25 @@ def teleoperate(
 
         def command_callback(status: str, msg: str, camera_name: str = "default"):
             if status_tracker:
-                if "started" in msg.lower() or status == "ok":
+                msg_lower = msg.lower()
+                if (
+                    "started" in msg_lower
+                    or (status == "ok" and ("streaming" in msg_lower or "running" in msg_lower))
+                ):
                     status_tracker.update_webrtc_state(camera_name, "streaming")
                     status_tracker.update_camera_status(camera_name, detected=True, started=True)
-                elif "stopped" in msg.lower():
+                elif status == "connecting" or "starting" in msg_lower:
+                    status_tracker.update_webrtc_state(camera_name, "connecting")
+                elif status == "error":
                     status_tracker.update_webrtc_state(camera_name, "idle")
+                elif "stopped" in msg_lower:
+                    status_tracker.update_webrtc_state(camera_name, "idle")
+                    status_tracker.update_camera_status(camera_name, detected=True, started=False)
 
         for info in camera_infos:
             cam_name = info["name"]
             status_tracker.update_camera_status(cam_name, detected=True, started=False)
-            status_tracker.update_webrtc_state(cam_name, "idle")
+            status_tracker.update_webrtc_state(cam_name, "connecting")
 
         camera_manager = CameraStreamManager(
             client=cyberwave_client,
