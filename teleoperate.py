@@ -50,6 +50,8 @@ from utils import load_calibration
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_CAMERA_CONFIG_PATH = str(get_setup_config_path())
+
 
 def _get_sensor_camera_name(twin: Twin, sensor_index: int = 0) -> Optional[str]:
     """Get camera/sensor name from twin capabilities for multi-stream routing.
