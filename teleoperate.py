@@ -45,7 +45,7 @@ from config import get_setup_config_path
 from follower import SO101Follower
 from leader import SO101Leader
 from motors import MotorNormMode
-from so101_setup import load_setup_config
+from cw_setup import load_setup_config
 from utils import load_calibration
 
 logger = logging.getLogger(__name__)
