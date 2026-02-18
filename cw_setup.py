@@ -74,6 +74,7 @@ def create_setup_config(
         "wrist_camera_id": wrist_camera_id,
         "wrist_camera_twin_uuid": wrist_camera_twin_uuid,
         "wrist_camera_name": "wrist_camera",
+        "wrist_camera_fourcc": "MJPG" if wrist_camera else None,
         "additional_cameras": [],
     }
 
