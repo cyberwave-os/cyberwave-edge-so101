@@ -124,6 +124,10 @@ class SO101Follower(SO101Robot):
             # If already calibrated but calibrate=True, re-calibrate
             logger.info(f"{self} is already calibrated, but re-calibrating as requested...")
             self.calibrate()
+        elif self.calibration:
+            # Restore calibration to motors (homing offset, position limits)
+            logger.info("Restoring calibration to follower motors (homing offset, position limits)")
+            self.bus.write_calibration(self.calibration)
 
         # Configure motors (set operating mode, PID coefficients)
         self.configure()

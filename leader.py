@@ -86,9 +86,12 @@ class SO101Leader(SO101Robot):
         )
         self.bus.connect()
 
-        # Calibrate if requested
+        # Calibrate if requested, otherwise restore calibration to motors
         if calibrate:
             self.calibrate()
+        elif self.calibration:
+            logger.info("Restoring calibration to leader motors (homing offset, position limits)")
+            self.bus.write_calibration(self.calibration)
 
         self._connected = True
         # Leader is passive (torque disabled) - user moves it manually
