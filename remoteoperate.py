@@ -556,30 +556,27 @@ def _status_logging_thread(
             lines.append(stats.ljust(70))
             lines.append("-" * 70)
 
-            # Joint states - show follower temperatures
-            if status["joint_states"]:
-                index_to_name = status_tracker.joint_index_to_name
-                lines.append("Motors:".ljust(70))
-                for joint_index in sorted(status["joint_states"].keys()):
-                    position = status["joint_states"][joint_index]
-                    joint_name = index_to_name.get(joint_index, joint_index)
+            # Joint states - always show (populated at startup from motor readings)
+            index_to_name = status_tracker.joint_index_to_name
+            lines.append("Motors:".ljust(70))
+            for joint_index in sorted(status["joint_states"].keys()):
+                position = status["joint_states"][joint_index]
+                joint_name = index_to_name.get(joint_index, joint_index)
 
-                    # Get temperature for this motor from follower
-                    follower_temp = status["joint_temperatures"].get(
-                        f"follower_{joint_index}", None
-                    )
+                # Get temperature for this motor from follower
+                follower_temp = status["joint_temperatures"].get(
+                    f"follower_{joint_index}", None
+                )
 
-                    # Build temperature display with indicator
-                    temp_str = "N/A"
-                    if follower_temp is not None:
-                        follower_indicator = "🔥" if follower_temp > 40 else ""
-                        temp_str = f"F:{follower_temp:3.0f}°C{follower_indicator}"
+                # Build temperature display with indicator
+                temp_str = "N/A"
+                if follower_temp is not None:
+                    follower_indicator = "🔥" if follower_temp > 40 else ""
+                    temp_str = f"F:{follower_temp:3.0f}°C{follower_indicator}"
 
-                    # Format: "  shoulder_pan:  pos=  0.79rad  F:34°C🔥"
-                    line = f"  {joint_name:16s}  pos={position:6.3f}rad  {temp_str}"
-                    lines.append(line[:70].ljust(70))
-            else:
-                lines.append("Motors: (waiting)".ljust(70))
+                # Format: "  shoulder_pan:  pos=  0.79rad  F:34°C🔥"
+                line = f"  {joint_name:16s}  pos={position:6.3f}rad  {temp_str}"
+                lines.append(line[:70].ljust(70))
 
             lines.append("=" * 70)
             lines.append("Press 'q' to stop".ljust(70))
@@ -762,38 +759,67 @@ def _camera_worker_thread(
                 pass
 
 
-def _radians_to_normalized(radians: float, norm_mode: MotorNormMode) -> float:
+def _radians_to_normalized(
+    radians: float,
+    norm_mode: MotorNormMode,
+    calib: Optional[Any] = None,
+) -> float:
     """
-    Convert radians to normalized position based on motor normalization mode.
+    Convert radians to normalized position based on motor normalization mode and calibration.
+
+    This is the inverse of teleoperate's normalized->radians conversion.
+    Uses calibration data when available for accurate conversion.
 
     Args:
         radians: Position in radians
         norm_mode: Motor normalization mode
+        calib: Calibration data with range_min and range_max (optional)
 
     Returns:
         Normalized position value
     """
-    if norm_mode == MotorNormMode.DEGREES:
-        # Convert radians to degrees
-        degrees = radians * 180.0 / math.pi
-        return degrees
-    elif norm_mode == MotorNormMode.RANGE_M100_100:
-        # Convert radians -> degrees -> normalized (-100 to 100)
-        # Reverse of: normalized / 100.0 * 180.0 = degrees
-        degrees = radians * 180.0 / math.pi
-        normalized = (degrees / 180.0) * 100.0
-        return normalized
-    elif norm_mode == MotorNormMode.RANGE_0_100:
-        # Convert radians -> degrees -> normalized (0 to 100)
-        # Reverse of: normalized / 100.0 * 360.0 = degrees
-        degrees = radians * 180.0 / math.pi
-        # Handle negative angles by converting to 0-360 range
-        if degrees < 0:
-            degrees = degrees + 360.0
-        normalized = (degrees / 360.0) * 100.0
-        return normalized
+    if calib is not None:
+        # Use calibration-based conversion (inverse of teleoperate's conversion)
+        r_min = calib.range_min
+        r_max = calib.range_max
+        delta_r = (r_max - r_min) / 2.0
+
+        if norm_mode == MotorNormMode.RANGE_M100_100:
+            # Inverse of: raw_offset = (normalized / 100.0) * delta_r
+            #             radians = raw_offset * (2.0 * math.pi / 4095.0)
+            # So: raw_offset = radians / (2.0 * math.pi / 4095.0)
+            #     normalized = (raw_offset / delta_r) * 100.0
+            raw_offset = radians / (2.0 * math.pi / 4095.0)
+            normalized = (raw_offset / delta_r) * 100.0
+            return normalized
+        elif norm_mode == MotorNormMode.RANGE_0_100:
+            # Inverse of teleoperate's conversion for RANGE_0_100
+            delta_r_full = r_max - r_min
+            # radians = (raw_value - r_min) * (2.0 * math.pi / 4095.0)
+            # raw_value = radians / (2.0 * math.pi / 4095.0) + r_min
+            # normalized = ((raw_value - r_min) / delta_r_full) * 100.0
+            raw_value = radians / (2.0 * math.pi / 4095.0) + r_min
+            normalized = ((raw_value - r_min) / delta_r_full) * 100.0
+            return normalized
+        else:  # DEGREES
+            return radians * 180.0 / math.pi
     else:
-        return radians
+        # Fallback without calibration
+        if norm_mode == MotorNormMode.DEGREES:
+            degrees = radians * 180.0 / math.pi
+            return degrees
+        elif norm_mode == MotorNormMode.RANGE_M100_100:
+            degrees = radians * 180.0 / math.pi
+            normalized = (degrees / 180.0) * 100.0
+            return normalized
+        elif norm_mode == MotorNormMode.RANGE_0_100:
+            degrees = radians * 180.0 / math.pi
+            if degrees < 0:
+                degrees = degrees + 360.0
+            normalized = (degrees / 360.0) * 100.0
+            return normalized
+        else:
+            return radians
 
 
 def _keyboard_input_thread(stop_event: threading.Event) -> None:
@@ -978,6 +1004,7 @@ def _create_joint_state_callback(
     joint_index_to_name: Dict[int, str],
     joint_name_to_norm_mode: Dict[str, MotorNormMode],
     follower: SO101Follower,
+    follower_calibration: Optional[Dict[str, Any]] = None,
     status_tracker: Optional[StatusTracker] = None,
 ) -> callable:
     """
@@ -989,6 +1016,7 @@ def _create_joint_state_callback(
         joint_index_to_name: Mapping from joint index (1-6) to joint name
         joint_name_to_norm_mode: Mapping from joint name to normalization mode
         follower: Follower instance for validation
+        follower_calibration: Calibration data for converting radians to normalized positions
         status_tracker: Optional status tracker for statistics
 
     Returns:
@@ -1071,8 +1099,11 @@ def _create_joint_state_callback(
                     status_tracker.increment_errors()
                 return
 
-            # Convert radians to normalized position
-            normalized_position = _radians_to_normalized(position_radians, norm_mode)
+            # Get calibration for this joint (if available)
+            calib = follower_calibration.get(joint_name) if follower_calibration else None
+
+            # Convert radians to normalized position using calibration
+            normalized_position = _radians_to_normalized(position_radians, norm_mode, calib)
 
             # Validate position
             motor_id = follower.motors[joint_name].id
@@ -1217,6 +1248,17 @@ def remoteoperate(
     if follower.calibration is not None:
         _upload_calibration_to_twin(follower, robot, "follower")
 
+    # Get follower calibration for proper conversion to/from radians
+    follower_calibration = None
+    if follower is not None and follower.calibration is not None:
+        follower_calibration = follower.calibration
+        assert follower_calibration.keys() == follower.motors.keys()
+        for joint_name, calibration in follower_calibration.items():
+            assert joint_name in follower.motors
+            assert calibration.range_min is not None
+            assert calibration.range_max is not None
+            assert calibration.range_min < calibration.range_max
+
     # Create mapping from joint index (motor ID) to joint name
     joint_index_to_name = {motor.id: name for name, motor in follower.motors.items()}
 
@@ -1229,14 +1271,56 @@ def remoteoperate(
 
     # Initialize current state with follower's current observation
     current_state: Dict[str, float] = {}
+    initial_joint_states_radians: Dict[str, float] = {}  # For status display
     try:
         # get_observation() handles SerialException internally and returns last known positions
         initial_obs = follower.get_observation()
         current_state.update(initial_obs)
+
+        # Convert to radians for status display
+        for joint_key, normalized_pos in initial_obs.items():
+            name = joint_key.removesuffix(".pos")
+            if name in follower.motors:
+                joint_index = follower.motors[name].id
+                norm_mode = joint_name_to_norm_mode[name]
+
+                # Convert normalized position to radians using calibration
+                if follower_calibration and name in follower_calibration:
+                    calib = follower_calibration[name]
+                    r_min = calib.range_min
+                    r_max = calib.range_max
+                    delta_r = (r_max - r_min) / 2.0
+
+                    if norm_mode == MotorNormMode.RANGE_M100_100:
+                        raw_offset = (normalized_pos / 100.0) * delta_r
+                        radians = raw_offset * (2.0 * math.pi / 4095.0)
+                    elif norm_mode == MotorNormMode.RANGE_0_100:
+                        delta_r_full = r_max - r_min
+                        raw_value = r_min + (normalized_pos / 100.0) * delta_r_full
+                        radians = (raw_value - r_min) * (2.0 * math.pi / 4095.0)
+                    else:
+                        radians = normalized_pos * math.pi / 180.0
+                else:
+                    # Fallback without calibration
+                    if norm_mode == MotorNormMode.RANGE_M100_100:
+                        degrees = (normalized_pos / 100.0) * 180.0
+                        radians = degrees * math.pi / 180.0
+                    elif norm_mode == MotorNormMode.RANGE_0_100:
+                        degrees = (normalized_pos / 100.0) * 360.0
+                        radians = degrees * math.pi / 180.0
+                    else:
+                        radians = normalized_pos * math.pi / 180.0
+
+                initial_joint_states_radians[str(joint_index)] = radians
     except Exception:
         # Initialize with empty state if get_observation() fails for other reasons
         for name in follower.motors.keys():
             current_state[f"{name}.pos"] = 0.0
+            joint_index = follower.motors[name].id
+            initial_joint_states_radians[str(joint_index)] = 0.0
+
+    # Populate initial joint states in status tracker (so we never show "waiting")
+    status_tracker.update_joint_states(initial_joint_states_radians)
 
     # Ensure MQTT client is connected
     mqtt_client = client.mqtt
@@ -1260,32 +1344,50 @@ def remoteoperate(
     # Send initial observation to Cyberwave using publish_initial_observation
     try:
         # Get follower's current observation (normalized positions)
-        # get_observation() handles SerialException internally and returns last known positions
         follower_obs = follower.get_observation()
 
-        # Convert to joint index format for initial observation
+        # Convert to joint index format for initial observation using calibration
         observations = {}
         for joint_key, normalized_pos in follower_obs.items():
-            # Remove .pos suffix if present
             name = joint_key.removesuffix(".pos")
             if name in follower.motors:
                 joint_index = follower.motors[name].id
-                # Convert normalized position to radians for Cyberwave
                 norm_mode = joint_name_to_norm_mode[name]
-                if norm_mode == MotorNormMode.RANGE_M100_100:
-                    degrees = (normalized_pos / 100.0) * 180.0
-                    radians = degrees * math.pi / 180.0
-                elif norm_mode == MotorNormMode.RANGE_0_100:
-                    degrees = (normalized_pos / 100.0) * 360.0
-                    radians = degrees * math.pi / 180.0
+
+                # Convert normalized position to radians using calibration (like teleoperate)
+                if follower_calibration and name in follower_calibration:
+                    calib = follower_calibration[name]
+                    r_min = calib.range_min
+                    r_max = calib.range_max
+                    delta_r = (r_max - r_min) / 2.0
+
+                    if norm_mode == MotorNormMode.RANGE_M100_100:
+                        raw_offset = (normalized_pos / 100.0) * delta_r
+                        radians = raw_offset * (2.0 * math.pi / 4095.0)
+                    elif norm_mode == MotorNormMode.RANGE_0_100:
+                        delta_r_full = r_max - r_min
+                        raw_value = r_min + (normalized_pos / 100.0) * delta_r_full
+                        radians = (raw_value - r_min) * (2.0 * math.pi / 4095.0)
+                    else:
+                        radians = normalized_pos * math.pi / 180.0
                 else:
-                    radians = normalized_pos * math.pi / 180.0  # Assume degrees
+                    # Fallback without calibration
+                    if norm_mode == MotorNormMode.RANGE_M100_100:
+                        degrees = (normalized_pos / 100.0) * 180.0
+                        radians = degrees * math.pi / 180.0
+                    elif norm_mode == MotorNormMode.RANGE_0_100:
+                        degrees = (normalized_pos / 100.0) * 360.0
+                        radians = degrees * math.pi / 180.0
+                    else:
+                        radians = normalized_pos * math.pi / 180.0
+
                 observations[joint_index] = radians
 
-        # Send initial observation as single update
+        # Send initial observation
         mqtt_client.publish_initial_observation(
             twin_uuid=twin_uuid,
             observations=observations,
+            fps=CONTROL_RATE_HZ,
         )
 
     except Exception:
@@ -1393,6 +1495,7 @@ def remoteoperate(
         joint_index_to_name=joint_index_to_name,
         joint_name_to_norm_mode=joint_name_to_norm_mode,
         follower=follower,
+        follower_calibration=follower_calibration,
         status_tracker=status_tracker,
     )
 
