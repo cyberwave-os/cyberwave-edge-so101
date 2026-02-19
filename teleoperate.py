@@ -1807,14 +1807,17 @@ def main():
                 sys.exit(1)
             twin = cyberwave_client.twin(twin_id=uuid)
             wrist_fps = setup_config.get("camera_fps", 30)
+            wrist_res = setup_config.get("wrist_camera_resolution", "VGA")
+            wrist_res_enum = _parse_resolution(wrist_res)
             cameras_list.append({
                 "twin": twin,
                 "camera_id": setup_config.get("wrist_camera_id", 0),
                 "camera_type": "cv2",
-                "camera_resolution": Resolution.VGA,
+                "camera_resolution": wrist_res_enum,
                 "camera_name": setup_config.get("wrist_camera_name", "wrist_camera"),
                 "fps": wrist_fps,
                 "fourcc": setup_config.get("wrist_camera_fourcc"),
+                "keyframe_interval": setup_config.get("wrist_camera_keyframe_interval"),
                 "enable_depth": False,
                 "depth_fps": 30,
                 "depth_resolution": None,

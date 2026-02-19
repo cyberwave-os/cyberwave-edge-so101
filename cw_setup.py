@@ -12,8 +12,9 @@ import json
 import sys
 from pathlib import Path
 
-from config import get_setup_config_path
 from dotenv import load_dotenv
+
+from config import get_setup_config_path
 
 # RealSense optional
 try:
@@ -50,6 +51,8 @@ def create_setup_config(
     wrist_camera: bool = False,
     wrist_camera_twin_uuid: str | None = None,
     wrist_camera_id: int | str = 0,
+    wrist_camera_resolution: str = "VGA",
+    wrist_camera_keyframe_interval: int | None = 60,
     additional_camera_type: str | None = None,
     additional_camera_id: int | str = 1,
     additional_camera_twin_uuid: str | None = None,
@@ -75,6 +78,8 @@ def create_setup_config(
         "wrist_camera_twin_uuid": wrist_camera_twin_uuid,
         "wrist_camera_name": "wrist_camera",
         "wrist_camera_fourcc": "MJPG" if wrist_camera else None,
+        "wrist_camera_resolution": wrist_camera_resolution,
+        "wrist_camera_keyframe_interval": wrist_camera_keyframe_interval,
         "additional_cameras": [],
     }
 
@@ -88,9 +93,7 @@ def create_setup_config(
             "resolution": _parse_resolution(resolution),
             "enable_depth": enable_depth,
             "depth_fps": depth_fps,
-            "depth_resolution": (
-                _parse_resolution(depth_resolution) if depth_resolution else None
-            ),
+            "depth_resolution": (_parse_resolution(depth_resolution) if depth_resolution else None),
             "depth_publish_interval": depth_publish_interval,
         }
         config["additional_cameras"].append(add_cam)
@@ -185,6 +188,19 @@ Examples:
         help="Camera device ID for wrist camera (default: 0)",
     )
     parser.add_argument(
+        "--wrist-camera-resolution",
+        type=str,
+        default="VGA",
+        help="Wrist camera resolution: QVGA, VGA, SVGA, HD, FULL_HD (default: VGA)",
+    )
+    parser.add_argument(
+        "--wrist-camera-keyframe-interval",
+        type=int,
+        default=60,
+        metavar="N",
+        help="Force keyframe every N frames for WebRTC (default: 60 = 2sec at 30fps)",
+    )
+    parser.add_argument(
         "--additional-camera",
         type=str,
         choices=["cv2", "realsense"],
@@ -266,13 +282,13 @@ Examples:
 
     # Validate
     if args.wrist_camera and not args.twin_uuid:
-        print("Error: --twin-uuid is required when using --wrist-camera (wrist camera streams to SO101 twin)")
+        print(
+            "Error: --twin-uuid is required when using --wrist-camera (wrist camera streams to SO101 twin)"
+        )
         return 1
 
     if args.additional_camera and not args.additional_camera_twin_uuid:
-        print(
-            "Error: --additional-camera-twin-uuid is required when using --additional-camera"
-        )
+        print("Error: --additional-camera-twin-uuid is required when using --additional-camera")
         return 1
 
     if args.additional_camera == "realsense" and not _has_realsense:
@@ -310,9 +326,7 @@ Examples:
         args.enable_depth = rs_config.enable_depth
         args.depth_fps = rs_config.depth_fps
         depth_resolution_str = (
-            f"{rs_config.depth_width}x{rs_config.depth_height}"
-            if rs_config.enable_depth
-            else None
+            f"{rs_config.depth_width}x{rs_config.depth_height}" if rs_config.enable_depth else None
         )
 
     config = create_setup_config(
@@ -320,6 +334,8 @@ Examples:
         wrist_camera=args.wrist_camera,
         wrist_camera_twin_uuid=args.twin_uuid,
         wrist_camera_id=wrist_camera_id,
+        wrist_camera_resolution=args.wrist_camera_resolution,
+        wrist_camera_keyframe_interval=args.wrist_camera_keyframe_interval,
         additional_camera_type=args.additional_camera,
         additional_camera_id=additional_camera_id,
         additional_camera_twin_uuid=args.additional_camera_twin_uuid,
