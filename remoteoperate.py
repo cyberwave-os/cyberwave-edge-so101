@@ -333,6 +333,9 @@ class StatusTracker:
         self.messages_filtered = 0
         self.errors = 0
         self.joint_states: Dict[str, float] = {}
+        self.joint_temperatures: Dict[
+            str, float
+        ] = {}  # Format: "follower_1" -> temperature
         self.joint_index_to_name: Dict[str, str] = {}
         self.robot_uuid: str = ""
         self.robot_name: str = ""
@@ -398,6 +401,11 @@ class StatusTracker:
         with self.lock:
             self.joint_states.update(states)
 
+    def update_joint_temperatures(self, temperatures: Dict[str, float]):
+        """Merge new joint temperatures with existing ones (doesn't replace)."""
+        with self.lock:
+            self.joint_temperatures.update(temperatures)
+
     def set_joint_index_to_name(self, mapping: Dict[str, str]):
         """Set mapping from joint index to joint name."""
         with self.lock:
@@ -427,9 +435,49 @@ class StatusTracker:
                 "messages_filtered": self.messages_filtered,
                 "errors": self.errors,
                 "joint_states": self.joint_states.copy(),
+                "joint_temperatures": self.joint_temperatures.copy(),
                 "robot_uuid": self.robot_uuid,
                 "robot_name": self.robot_name,
             }
+
+
+def _read_temperatures(
+    follower: Optional[SO101Follower],
+    joint_index_to_name: Dict[str, str],
+) -> Dict[str, float]:
+    """
+    Read temperatures from follower motors.
+
+    Args:
+        follower: SO101Follower instance (optional)
+        joint_index_to_name: Mapping from joint index to joint name
+
+    Returns:
+        Dictionary mapping "follower_{motor_id}" to temperature in Celsius
+    """
+    temperatures = {}
+
+    try:
+        from motors.tables import ADDR_PRESENT_TEMPERATURE
+
+        addr = ADDR_PRESENT_TEMPERATURE[0]  # Temperature is 1 byte
+
+        # Read temperatures from follower
+        if follower is not None and follower.connected:
+            motor_ids = [motor.id for motor in follower.motors.values()]
+            for motor_id in motor_ids:
+                try:
+                    temperature, result, error = follower.bus._packet_handler.read1ByteTxRx(
+                        follower.bus._port_handler, motor_id, addr
+                    )
+                    if result == 0:  # COMM_SUCCESS
+                        temperatures[f"follower_{motor_id}"] = float(temperature)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return temperatures
 
 
 def _status_logging_thread(
@@ -437,6 +485,7 @@ def _status_logging_thread(
     stop_event: threading.Event,
     fps: int,
     camera_fps: int,
+    follower: Optional[SO101Follower] = None,
 ) -> None:
     """
     Thread that logs status information at 1 fps.
@@ -446,6 +495,7 @@ def _status_logging_thread(
         stop_event: Event to signal thread to stop
         fps: Target frames per second for remote operation loop
         camera_fps: Frames per second for camera streaming
+        follower: Optional SO101Follower instance for reading temperatures
     """
     status_tracker.fps = fps
     status_tracker.camera_fps = camera_fps
@@ -457,6 +507,12 @@ def _status_logging_thread(
 
     try:
         while not stop_event.is_set():
+            # Read temperatures from follower if available
+            joint_index_to_name = status_tracker.joint_index_to_name
+            temperatures = _read_temperatures(follower, joint_index_to_name)
+            if temperatures:
+                status_tracker.update_joint_temperatures(temperatures)
+
             status = status_tracker.get_status()
 
             # Build status display with fixed width lines
@@ -500,15 +556,27 @@ def _status_logging_thread(
             lines.append(stats.ljust(70))
             lines.append("-" * 70)
 
-            # Joint states
+            # Joint states - show follower temperatures
             if status["joint_states"]:
                 index_to_name = status_tracker.joint_index_to_name
                 lines.append("Motors:".ljust(70))
                 for joint_index in sorted(status["joint_states"].keys()):
                     position = status["joint_states"][joint_index]
                     joint_name = index_to_name.get(joint_index, joint_index)
-                    # Format: "  shoulder_pan:  pos=  0.79"
-                    line = f"  {joint_name:16s}  pos={position:6.1f}"
+
+                    # Get temperature for this motor from follower
+                    follower_temp = status["joint_temperatures"].get(
+                        f"follower_{joint_index}", None
+                    )
+
+                    # Build temperature display with indicator
+                    temp_str = "N/A"
+                    if follower_temp is not None:
+                        follower_indicator = "🔥" if follower_temp > 40 else ""
+                        temp_str = f"F:{follower_temp:3.0f}°C{follower_indicator}"
+
+                    # Format: "  shoulder_pan:  pos=  0.79rad  F:34°C🔥"
+                    line = f"  {joint_name:16s}  pos={position:6.3f}rad  {temp_str}"
                     lines.append(line[:70].ljust(70))
             else:
                 lines.append("Motors: (waiting)".ljust(70))
@@ -1021,9 +1089,9 @@ def _create_joint_state_callback(
             # Also update the current_state dictionary
             current_state[f"{joint_name}.pos"] = normalized_position
 
-            # Update joint states in status tracker
+            # Update joint states in status tracker (store radians for display)
             if status_tracker:
-                joint_states = {str(joint_index): normalized_position}
+                joint_states = {str(joint_index): position_radians}
                 status_tracker.update_joint_states(joint_states)
 
             # Put action in queue (non-blocking)
@@ -1240,7 +1308,7 @@ def remoteoperate(
     # Start status logging thread
     status_thread = threading.Thread(
         target=_status_logging_thread,
-        args=(status_tracker, stop_event, CONTROL_RATE_HZ, camera_fps),
+        args=(status_tracker, stop_event, CONTROL_RATE_HZ, camera_fps, follower),
         daemon=True,
     )
     status_thread.start()
