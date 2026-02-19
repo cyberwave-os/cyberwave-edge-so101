@@ -11,23 +11,25 @@ import select
 import sys
 import threading
 import time
-from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, Optional, Union
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
 from cyberwave import Cyberwave, Twin
-from cyberwave.utils import TimeReference
 
-# Import camera configuration and streamers from cyberwave SDK
+# Import camera configuration and stream manager from cyberwave SDK
 from cyberwave.sensor import (
+    CameraStreamManager,
     CV2CameraStreamer,
-    CameraConfig,
+    RealSenseStreamer,
     Resolution,
 )
+from cyberwave.utils import TimeReference
+from dotenv import load_dotenv
 
 # RealSense is optional - only import if available
 try:
     from cyberwave.sensor import (
-        RealSenseStreamer,
         RealSenseConfig,
         RealSenseDiscovery,
     )
@@ -35,21 +37,40 @@ try:
     _has_realsense = True
 except ImportError:
     _has_realsense = False
-    RealSenseStreamer = None
     RealSenseConfig = None
     RealSenseDiscovery = None
 
-from dotenv import load_dotenv
+from config import get_setup_config_path
+from cw_setup import load_setup_config
 from follower import SO101Follower
 from motors import MotorNormMode
-from write_position import validate_position
-from pathlib import Path
 from utils import load_calibration
+from write_position import validate_position
 
 logger = logging.getLogger(__name__)
 
-# Default camera config file path
-DEFAULT_CAMERA_CONFIG_PATH = "camera_config.json"
+DEFAULT_CAMERA_CONFIG_PATH = str(get_setup_config_path())
+
+
+def _get_sensor_camera_name(twin: Twin, sensor_index: int = 0) -> Optional[str]:
+    """Get camera/sensor name from twin capabilities for multi-stream routing.
+
+    Uses the sensor id from capabilities.sensors when available (e.g. "head_camera",
+    "integrated_camera"). Returns None for single-stream backward compatibility.
+
+    Args:
+        twin: Twin with potential sensor capabilities
+        sensor_index: Index of sensor to use (default: 0)
+
+    Returns:
+        Sensor id string or None
+    """
+    sensors = twin.capabilities.get("sensors", [])
+    if sensors and sensor_index < len(sensors):
+        sensor = sensors[sensor_index]
+        if isinstance(sensor, dict):
+            return sensor.get("id")
+    return None
 
 
 @dataclass
@@ -69,6 +90,33 @@ class RemoteoperateCameraConfig:
         depth_resolution: Depth resolution as [width, height] list (optional)
         depth_publish_interval: Publish depth every N frames for RealSense
         serial_number: RealSense device serial number (optional)
+
+    Example JSON file (camera_config.json):
+        {
+            "camera_type": "cv2",
+            "camera_id": 0,
+            "fps": 30,
+            "resolution": [640, 480]
+        }
+
+    Example for RealSense:
+        {
+            "camera_type": "realsense",
+            "fps": 30,
+            "resolution": [1280, 720],
+            "enable_depth": true,
+            "depth_fps": 15,
+            "depth_resolution": [640, 480],
+            "depth_publish_interval": 30
+        }
+
+    Example for IP camera:
+        {
+            "camera_type": "cv2",
+            "camera_id": "rtsp://192.168.1.100:554/stream",
+            "fps": 15,
+            "resolution": [640, 480]
+        }
     """
 
     camera_type: str = "cv2"
@@ -104,25 +152,45 @@ class RemoteoperateCameraConfig:
         return asdict(self)
 
     def save(self, path: str = DEFAULT_CAMERA_CONFIG_PATH) -> None:
-        """Save configuration to JSON file."""
+        """Save configuration to JSON file.
+
+        Args:
+            path: Path to save the configuration file
+        """
         with open(path, "w") as f:
             json.dump(self.to_dict(), f, indent=2)
         logger.info(f"Camera configuration saved to {path}")
 
     @classmethod
     def load(cls, path: str = DEFAULT_CAMERA_CONFIG_PATH) -> "RemoteoperateCameraConfig":
-        """Load configuration from JSON file."""
+        """Load configuration from JSON file.
+
+        Args:
+            path: Path to the configuration file
+
+        Returns:
+            RemoteoperateCameraConfig instance
+
+        Raises:
+            FileNotFoundError: If the configuration file doesn't exist
+            json.JSONDecodeError: If the file is not valid JSON
+        """
         with open(path, "r") as f:
             data = json.load(f)
 
         # Handle resolution conversion
         if "resolution" in data and isinstance(data["resolution"], str):
+            # Parse "WIDTHxHEIGHT" format
             width, height = map(int, data["resolution"].lower().split("x"))
             data["resolution"] = [width, height]
 
         if "depth_resolution" in data and isinstance(data["depth_resolution"], str):
             width, height = map(int, data["depth_resolution"].lower().split("x"))
             data["depth_resolution"] = [width, height]
+
+        # Normalize enable_depth: handle string "true"/"false" from JSON
+        if "enable_depth" in data and isinstance(data["enable_depth"], str):
+            data["enable_depth"] = data["enable_depth"].lower() in ("true", "1", "yes")
 
         logger.info(f"Camera configuration loaded from {path}")
         return cls(**data)
@@ -135,12 +203,25 @@ class RemoteoperateCameraConfig:
         enable_depth: bool = True,
         serial_number: Optional[str] = None,
     ) -> "RemoteoperateCameraConfig":
-        """Create configuration from connected RealSense device."""
+        """Create configuration from connected RealSense device.
+
+        Auto-detects device capabilities and creates optimal configuration.
+
+        Args:
+            prefer_resolution: Preferred resolution (will find closest match)
+            prefer_fps: Preferred FPS (will find closest match)
+            enable_depth: Whether to enable depth streaming
+            serial_number: Target device serial number (None = first device)
+
+        Returns:
+            RemoteoperateCameraConfig configured for the device
+        """
         if not _has_realsense:
             raise ImportError(
                 "RealSense support requires pyrealsense2. Install with: pip install pyrealsense2"
             )
 
+        # Use SDK's RealSenseConfig.from_device() for auto-detection
         rs_config = RealSenseConfig.from_device(
             serial_number=serial_number,
             prefer_resolution=prefer_resolution,
@@ -166,7 +247,16 @@ class RemoteoperateCameraConfig:
         fps: int = 30,
         resolution: Resolution = Resolution.VGA,
     ) -> "RemoteoperateCameraConfig":
-        """Create default CV2 camera configuration."""
+        """Create default CV2 camera configuration.
+
+        Args:
+            camera_id: Camera device ID or stream URL
+            fps: Frames per second
+            resolution: Video resolution
+
+        Returns:
+            RemoteoperateCameraConfig for CV2 camera
+        """
         return cls(
             camera_type="cv2",
             camera_id=camera_id,
@@ -234,10 +324,8 @@ class StatusTracker:
         self.script_started = False
         self.mqtt_connected = False
         self.camera_enabled = False  # Whether camera streaming was configured at all
-        self.camera_detected = False
-        self.camera_started = False
-        # WebRTC states: "idle" (red), "connecting" (yellow), "streaming" (green)
-        self.webrtc_state = "idle"
+        # Per-camera: camera_name -> {detected, started, webrtc_state}
+        self.camera_states: Dict[str, Dict[str, Any]] = {}
         self.fps = 0
         self.camera_fps = 0
         self.messages_received = 0
@@ -248,22 +336,46 @@ class StatusTracker:
         self.joint_index_to_name: Dict[str, str] = {}
         self.robot_uuid: str = ""
         self.robot_name: str = ""
-        self.camera_uuid: str = ""
-        self.camera_name: str = ""
+        self.camera_infos: List[Dict[str, str]] = []  # [{uuid, name}, ...] per camera
 
     def update_mqtt_status(self, connected: bool):
         with self.lock:
             self.mqtt_connected = connected
 
-    def update_camera_status(self, detected: bool, started: bool = False):
+    def set_camera_infos(self, infos: List[Dict[str, str]]) -> None:
+        """Set camera info list and initialize per-camera states."""
         with self.lock:
-            self.camera_detected = detected
-            self.camera_started = started
+            self.camera_infos = list(infos)
+            for info in infos:
+                name = info.get("name", "default")
+                if name not in self.camera_states:
+                    self.camera_states[name] = {
+                        "detected": False,
+                        "started": False,
+                        "webrtc_state": "idle",
+                    }
 
-    def update_webrtc_state(self, state: str):
-        """Update WebRTC state: 'idle', 'connecting', or 'streaming'."""
+    def update_camera_status(self, camera_name: str, detected: bool, started: bool = False):
         with self.lock:
-            self.webrtc_state = state
+            if camera_name not in self.camera_states:
+                self.camera_states[camera_name] = {
+                    "detected": False,
+                    "started": False,
+                    "webrtc_state": "idle",
+                }
+            self.camera_states[camera_name]["detected"] = detected
+            self.camera_states[camera_name]["started"] = started
+
+    def update_webrtc_state(self, camera_name: str, state: str):
+        """Update WebRTC state for a camera: 'idle', 'connecting', or 'streaming'."""
+        with self.lock:
+            if camera_name not in self.camera_states:
+                self.camera_states[camera_name] = {
+                    "detected": False,
+                    "started": False,
+                    "webrtc_state": "idle",
+                }
+            self.camera_states[camera_name]["webrtc_state"] = state
 
     def increment_received(self):
         with self.lock:
@@ -292,12 +404,12 @@ class StatusTracker:
             self.joint_index_to_name = mapping.copy()
 
     def set_twin_info(self, robot_uuid: str, robot_name: str, camera_uuid: str, camera_name: str):
-        """Set twin information for display."""
+        """Set twin information for display (legacy single-camera)."""
         with self.lock:
             self.robot_uuid = robot_uuid
             self.robot_name = robot_name
-            self.camera_uuid = camera_uuid
-            self.camera_name = camera_name
+            if not self.camera_infos:
+                self.camera_infos = [{"uuid": camera_uuid, "name": camera_name}]
 
     def get_status(self) -> Dict:
         """Get a snapshot of current status."""
@@ -306,9 +418,8 @@ class StatusTracker:
                 "script_started": self.script_started,
                 "mqtt_connected": self.mqtt_connected,
                 "camera_enabled": self.camera_enabled,
-                "camera_detected": self.camera_detected,
-                "camera_started": self.camera_started,
-                "webrtc_state": self.webrtc_state,
+                "camera_states": {k: dict(v) for k, v in self.camera_states.items()},
+                "camera_infos": list(self.camera_infos),
                 "fps": self.fps,
                 "camera_fps": self.camera_fps,
                 "messages_received": self.messages_received,
@@ -318,14 +429,13 @@ class StatusTracker:
                 "joint_states": self.joint_states.copy(),
                 "robot_uuid": self.robot_uuid,
                 "robot_name": self.robot_name,
-                "camera_uuid": self.camera_uuid,
-                "camera_name": self.camera_name,
             }
 
 
 def _status_logging_thread(
     status_tracker: StatusTracker,
     stop_event: threading.Event,
+    fps: int,
     camera_fps: int,
 ) -> None:
     """
@@ -334,8 +444,10 @@ def _status_logging_thread(
     Args:
         status_tracker: StatusTracker instance
         stop_event: Event to signal thread to stop
+        fps: Target frames per second for remote operation loop
         camera_fps: Frames per second for camera streaming
     """
+    status_tracker.fps = fps
     status_tracker.camera_fps = camera_fps
     status_interval = 1.0  # Update status at 1 fps
 
@@ -357,8 +469,22 @@ def _status_logging_thread(
             robot_name = status["robot_name"] or "N/A"
             lines.append(f"Robot:  {robot_name} ({status['robot_uuid']})"[:70].ljust(70))
             if status["camera_enabled"]:
-                camera_name = status["camera_name"] or "N/A"
-                lines.append(f"Camera: {camera_name} ({status['camera_uuid']})"[:70].ljust(70))
+                camera_infos = status.get("camera_infos", [])
+                camera_states = status.get("camera_states", {})
+                for info in camera_infos:
+                    cam_name = info.get("name", "default")
+                    cam_uuid = info.get("uuid", "")[:8]
+                    state = camera_states.get(cam_name, {})
+                    detected = state.get("detected", False)
+                    started = state.get("started", False)
+                    webrtc = state.get("webrtc_state", "idle")
+                    cam_icon = "🟢" if (detected and started) else ("🟡" if detected else "🔴")
+                    webrtc_icon = (
+                        "🟢" if webrtc == "streaming" else ("🟡" if webrtc == "connecting" else "🔴")
+                    )
+                    lines.append(
+                        f"  {cam_name}: Cam{cam_icon} WebRTC{webrtc_icon} ({cam_uuid}...)"[:70].ljust(70)
+                    )
             else:
                 lines.append("Camera: not configured".ljust(70))
             lines.append("-" * 70)
@@ -366,49 +492,26 @@ def _status_logging_thread(
             # Status indicators
             script_icon = "🟢" if status["script_started"] else "🟡"
             mqtt_icon = "🟢" if status["mqtt_connected"] else "🔴"
-            if not status["camera_enabled"]:
-                camera_icon = "⚫"  # Not configured
-                webrtc_icon = "⚫"
-            else:
-                if not status["camera_detected"]:
-                    camera_icon = "🔴"
-                elif not status["camera_started"]:
-                    camera_icon = "🟡"
-                else:
-                    camera_icon = "🟢"
-                # WebRTC: idle=red, connecting=yellow, streaming=green
-                webrtc_state = status["webrtc_state"]
-                if webrtc_state == "streaming":
-                    webrtc_icon = "🟢"
-                elif webrtc_state == "connecting":
-                    webrtc_icon = "🟡"
-                else:
-                    webrtc_icon = "🔴"
-
-            lines.append(
-                f"Script:{script_icon} MQTT:{mqtt_icon} Camera:{camera_icon} WebRTC:{webrtc_icon}".ljust(
-                    70
-                )
-            )
+            lines.append(f"Script:{script_icon} MQTT:{mqtt_icon}".ljust(70))
             lines.append("-" * 70)
 
             # Statistics
-            stats = f"Cam:{status['camera_fps']} Recv:{status['messages_received']} Proc:{status['messages_processed']} Filt:{status['messages_filtered']} Err:{status['errors']}"
+            stats = f"FPS:{status['fps']} Cam:{status['camera_fps']} Recv:{status['messages_received']} Proc:{status['messages_processed']} Filt:{status['messages_filtered']} Err:{status['errors']}"
             lines.append(stats.ljust(70))
             lines.append("-" * 70)
 
             # Joint states
             if status["joint_states"]:
                 index_to_name = status_tracker.joint_index_to_name
-                joint_parts = []
+                lines.append("Motors:".ljust(70))
                 for joint_index in sorted(status["joint_states"].keys()):
                     position = status["joint_states"][joint_index]
                     joint_name = index_to_name.get(joint_index, joint_index)
-                    short_name = joint_name[:3]
-                    joint_parts.append(f"{short_name}:{position:5.1f}")
-                lines.append(" ".join(joint_parts).ljust(70))
+                    # Format: "  shoulder_pan:  pos=  0.79"
+                    line = f"  {joint_name:16s}  pos={position:6.1f}"
+                    lines.append(line[:70].ljust(70))
             else:
-                lines.append("Joints: (waiting)".ljust(70))
+                lines.append("Motors: (waiting)".ljust(70))
 
             lines.append("=" * 70)
             lines.append("Press 'q' to stop".ljust(70))
@@ -446,6 +549,7 @@ def _camera_worker_thread(
     depth_fps: int = 30,
     depth_resolution: Optional[Resolution] = None,
     depth_publish_interval: int = 30,
+    camera_name: Optional[str] = None,
 ) -> None:
     """
     Worker thread that handles camera streaming.
@@ -469,20 +573,27 @@ def _camera_worker_thread(
         depth_fps: Depth stream FPS for RealSense (default: 30)
         depth_resolution: Depth resolution for RealSense (default: same as color)
         depth_publish_interval: Publish depth every N frames for RealSense (default: 30)
+        camera_name: Optional sensor identifier for multi-stream twins (from capabilities.sensors)
     Returns:
         None
     """
     if status_tracker:
-        status_tracker.update_camera_status(detected=True, started=False)
+        status_tracker.update_camera_status(camera_name or "default", detected=True, started=False)
 
     async def _run_camera_streamer():
         """Async function that runs the camera streamer with auto-reconnect."""
         # Create async stop event from threading.Event
         async_stop_event = asyncio.Event()
 
-        # Ensure MQTT is connected
+        # Ensure MQTT is connected and wait for connection (required for WebRTC offer/answer)
         if not client.mqtt.connected:
             client.mqtt.connect()
+        max_wait = 10.0
+        wait_start = time.time()
+        while not client.mqtt.connected:
+            if time.time() - wait_start > max_wait:
+                raise RuntimeError("Failed to connect to MQTT broker - cannot send WebRTC offer")
+            await asyncio.sleep(0.1)
 
         # Create camera streamer based on camera type
         streamer = None
@@ -498,6 +609,7 @@ def _camera_worker_thread(
                 twin_uuid=twin_uuid,
                 time_reference=time_reference,
                 auto_reconnect=True,
+                camera_name=camera_name,
             )
         elif camera_type_lower == "realsense":
             if not _has_realsense:
@@ -521,6 +633,7 @@ def _camera_worker_thread(
                 twin_uuid=twin_uuid,
                 time_reference=time_reference,
                 auto_reconnect=True,
+                camera_name=camera_name,
             )
         else:
             raise ValueError(f"Unsupported camera type: {camera_type}. Use 'cv2' or 'realsense'.")
@@ -538,18 +651,19 @@ def _camera_worker_thread(
             """Callback to track WebRTC state from commands."""
             if status_tracker:
                 if "started" in msg.lower() or status == "ok":
-                    status_tracker.update_webrtc_state("streaming")
+                    status_tracker.update_webrtc_state(camera_name or "default", "streaming")
                 elif "stopped" in msg.lower():
-                    status_tracker.update_webrtc_state("idle")
+                    status_tracker.update_webrtc_state(camera_name or "default", "idle")
 
         try:
             # Update status when camera starts
             if status_tracker:
-                status_tracker.update_camera_status(detected=True, started=True)
-                # WebRTC starts in connecting state when camera worker begins
-                status_tracker.update_webrtc_state("connecting")
+                status_tracker.update_camera_status(camera_name or "default", detected=True, started=True)
+                # WebRTC starts in idle state, waiting for start_video command
+                status_tracker.update_webrtc_state(camera_name or "default", "idle")
 
-            # Run with auto-reconnect - this handles all command subscriptions internally
+            # Run with auto-reconnect - handles command subscriptions and connection monitoring
+            # Waits for start_video command before starting streaming
             await streamer.run_with_auto_reconnect(
                 stop_event=async_stop_event,
                 command_callback=command_callback,
@@ -567,9 +681,11 @@ def _camera_worker_thread(
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(_run_camera_streamer())
-    except Exception:
+    except Exception as e:
         if status_tracker:
             status_tracker.increment_errors()
+        # Surface camera/WebRTC errors so user can diagnose (logging is disabled)
+        print(f"Camera streaming error: {e}", file=sys.stderr)
     finally:
         if loop is not None:
             try:
@@ -714,7 +830,7 @@ def _motor_writer_worker(
 
                     # Send steps quickly without waiting for physical movement
                     # This allows the queue to process new actions faster
-                    for step in range(max_steps):
+                    for _ in range(max_steps):
                         # Check which joints still need to move
                         remaining_movements = {}
                         for joint_name, goal_val in goal_pos.items():
@@ -924,11 +1040,15 @@ def _create_joint_state_callback(
     return callback
 
 
+CONTROL_RATE_HZ = 100
+
+
 def remoteoperate(
     client: Cyberwave,
     follower: SO101Follower,
     robot: Optional[Twin] = None,
     camera: Optional[Twin] = None,
+    cameras: Optional[List[Dict[str, Any]]] = None,
     fps: int = 30,
     camera_fps: int = 30,
     camera_type: str = "cv2",
@@ -948,7 +1068,10 @@ def remoteoperate(
         client: Cyberwave client instance
         follower: SO101Follower instance
         robot: Robot twin instance
-        camera: Camera twin instance
+        camera: Camera twin instance (single camera, backward compat). Ignored if cameras is set.
+        cameras: List of camera configs for multi-stream. Each dict: twin, camera_id, camera_name
+            (optional, from sensor id), camera_type, camera_resolution, enable_depth, etc.
+            Each entry gets its own stream manager to avoid cascading failures.
         fps: Target frames per second (not used directly, but kept for compatibility)
         camera_fps: Frames per second for camera streaming
         camera_type: Camera type - "cv2" for USB/webcam/IP, "realsense" for Intel RealSense
@@ -964,17 +1087,50 @@ def remoteoperate(
     # Disable all logging to avoid interfering with status display
     logging.disable(logging.CRITICAL)
 
+    # Build camera twins for CameraStreamManager (twin + optional overrides)
+    camera_twins: List[Any] = []
+    if cameras is not None:
+        # cameras: list of dicts with "twin" and overrides -> (twin, overrides)
+        for cfg in cameras:
+            twin = cfg["twin"]
+            overrides = {k: v for k, v in cfg.items() if k != "twin"}
+            camera_twins.append((twin, overrides) if overrides else twin)
+    elif camera is not None:
+        actual_camera_id = camera_id
+        if follower is not None and follower.config.cameras and len(follower.config.cameras) > 0:
+            actual_camera_id = follower.config.cameras[0]
+        overrides = {
+            "camera_id": actual_camera_id,
+            "camera_type": camera_type,
+            "camera_resolution": camera_resolution,
+            "enable_depth": enable_depth,
+            "depth_fps": depth_fps,
+            "depth_resolution": depth_resolution,
+            "depth_publish_interval": depth_publish_interval,
+        }
+        camera_twins.append((camera, overrides))
+
     # Create status tracker
     status_tracker = StatusTracker()
     status_tracker.script_started = True
-    status_tracker.camera_enabled = camera is not None
+    status_tracker.camera_enabled = len(camera_twins) > 0
 
-    # Set twin info for status display
+    # Set twin info for status display (use first camera for display)
     robot_uuid = robot.uuid if robot else ""
     robot_name = robot.name if robot and hasattr(robot, "name") else "so101-remote"
-    camera_uuid_val = camera.uuid if camera else ""
-    camera_name = camera.name if camera and hasattr(camera, "name") else ""
-    status_tracker.set_twin_info(robot_uuid, robot_name, camera_uuid_val, camera_name)
+
+    def _first_twin(twins: List[Any]):
+        if not twins:
+            return None
+        first = twins[0]
+        return first[0] if isinstance(first, tuple) else first
+
+    first_camera_twin = _first_twin(camera_twins)
+    camera_uuid_val = first_camera_twin.uuid if first_camera_twin else ""
+    camera_display_name = (
+        first_camera_twin.name if first_camera_twin and hasattr(first_camera_twin, "name") else ""
+    )
+    status_tracker.set_twin_info(robot_uuid, robot_name, camera_uuid_val, camera_display_name)
 
     # Get twin_uuid from robot twin
     if robot is None:
@@ -1084,41 +1240,83 @@ def remoteoperate(
     # Start status logging thread
     status_thread = threading.Thread(
         target=_status_logging_thread,
-        args=(status_tracker, stop_event, camera_fps),
+        args=(status_tracker, stop_event, CONTROL_RATE_HZ, camera_fps),
         daemon=True,
     )
     status_thread.start()
 
-    # Start camera streaming thread if camera twin is provided
-    camera_thread = None
-    if camera is not None:
-        # Determine camera_id from follower config or use provided camera_id
-        actual_camera_id = camera_id
-        if follower.config.cameras and len(follower.config.cameras) > 0:
-            actual_camera_id = follower.config.cameras[0]
-
-        camera_thread = threading.Thread(
-            target=_camera_worker_thread,
-            args=(
-                client,
-                actual_camera_id,
-                camera_fps,
-                camera.uuid,
-                stop_event,
-                time_reference,
-                status_tracker,
-                camera_type,
-                camera_resolution,
-                enable_depth,
-                depth_fps,
-                depth_resolution,
-                depth_publish_interval,
-            ),
-            daemon=True,
+    # Start camera streaming via SDK CameraStreamManager (one stream per twin, each with own thread)
+    camera_manager: Optional[CameraStreamManager] = None
+    if camera_twins and client is not None:
+        # Enrich overrides with camera_id from follower and fps where not set
+        follower_cameras = (
+            follower.config.cameras if follower is not None and follower.config.cameras else []
         )
-        camera_thread.start()
+        enriched_twins: List[Any] = []
+        for idx, item in enumerate(camera_twins):
+            if isinstance(item, tuple):
+                twin, overrides = item
+                overrides = dict(overrides)
+            else:
+                twin = item
+                overrides = {}
+            if "camera_id" not in overrides:
+                overrides["camera_id"] = (
+                    follower_cameras[idx] if idx < len(follower_cameras) else 0
+                )
+            overrides.setdefault("fps", camera_fps)
+            enriched_twins.append((twin, overrides))
+
+        # Build camera infos for per-camera status display
+        camera_infos = []
+        for item in enriched_twins:
+            if isinstance(item, tuple):
+                twin, overrides = item
+            else:
+                twin, overrides = item, {}
+            cam_name = overrides.get("camera_name")
+            if not cam_name:
+                sensors = getattr(twin, "capabilities", {}).get("sensors", [])
+                cam_name = (
+                    sensors[0].get("id", "default")
+                    if sensors and isinstance(sensors[0], dict)
+                    else "default"
+                )
+            camera_infos.append({"uuid": str(twin.uuid), "name": cam_name})
+        status_tracker.set_camera_infos(camera_infos)
+
+        def command_callback(status: str, msg: str, camera_name: str = "default"):
+            if status_tracker:
+                msg_lower = msg.lower()
+                if (
+                    "started" in msg_lower
+                    or (status == "ok" and ("streaming" in msg_lower or "running" in msg_lower))
+                ):
+                    status_tracker.update_webrtc_state(camera_name, "streaming")
+                    status_tracker.update_camera_status(camera_name, detected=True, started=True)
+                elif status == "connecting" or "starting" in msg_lower:
+                    status_tracker.update_webrtc_state(camera_name, "connecting")
+                elif status == "error":
+                    status_tracker.update_webrtc_state(camera_name, "idle")
+                elif "stopped" in msg_lower:
+                    status_tracker.update_webrtc_state(camera_name, "idle")
+                    status_tracker.update_camera_status(camera_name, detected=True, started=False)
+
+        for info in camera_infos:
+            cam_name = info["name"]
+            status_tracker.update_camera_status(cam_name, detected=True, started=False)
+            status_tracker.update_webrtc_state(cam_name, "connecting")
+
+        camera_manager = CameraStreamManager(
+            client=client,
+            twins=enriched_twins,
+            stop_event=stop_event,
+            time_reference=time_reference,
+            command_callback=command_callback,
+        )
+        camera_manager.start()
     else:
-        status_tracker.update_camera_status(detected=False, started=False)
+        status_tracker.camera_states.clear()
 
     # Create callback for joint state updates
     joint_state_callback = _create_joint_state_callback(
@@ -1160,9 +1358,9 @@ def remoteoperate(
         # Wait for writer thread to finish
         writer_thread.join(timeout=1.0)
 
-        # Stop camera streaming thread
-        if camera_thread is not None:
-            camera_thread.join(timeout=5.0)
+        # Stop camera streaming
+        if camera_manager is not None:
+            camera_manager.join(timeout=5.0)
 
         # Stop status thread
         if status_thread is not None:
@@ -1265,103 +1463,34 @@ def _parse_resolution(resolution_str: str) -> Resolution:
 
 def main():
     """Main entry point for remote operation script."""
+    # Load environment variables from .env file
     load_dotenv()
-    parser = argparse.ArgumentParser(description="Remote operate SO101 follower via Cyberwave MQTT")
+
+    parser = argparse.ArgumentParser(
+        description="Remote operate SO101 follower via Cyberwave MQTT"
+    )
     parser.add_argument(
         "--twin-uuid",
         type=str,
-        required=False,
         default=os.getenv("CYBERWAVE_TWIN_UUID"),
-        help="UUID of the twin to subscribe to",
+        help="SO101 twin UUID (override from setup.json)",
     )
     parser.add_argument(
         "--follower-port",
         type=str,
-        required=True,
         default=os.getenv("CYBERWAVE_METADATA_FOLLOWER_PORT"),
-        help="Serial port for follower device",
-    )
-    parser.add_argument(
-        "--max-relative-target",
-        type=float,
-        default=None,
-        help="Maximum change per update for follower (raw encoder units, default: None = no limit). "
-        "Set to a value to enable safety limit (e.g., 50.0 for slower/safer movement).",
-    )
-    parser.add_argument(
-        "--follower-id",
-        type=str,
-        default="follower1",
-        help="Device identifier for calibration file (default: 'follower1')",
-    )
-    parser.add_argument(
-        "--camera-uuid",
-        type=str,
-        required=False,
-        help="UUID of the twin to stream camera to (default: same as --twin-uuid)",
-    )
-    parser.add_argument(
-        "--camera-fps",
-        type=int,
-        required=False,
-        default=30,
-        help="FPS to use for the camera (default: 30)",
-    )
-    parser.add_argument(
-        "--camera-type",
-        type=str,
-        choices=["cv2", "realsense"],
-        default=os.getenv("CYBERWAVE_METADATA_CAMERA_TYPE", "cv2"),
-        help="Camera type: 'cv2' for USB/webcam/IP cameras, 'realsense' for Intel RealSense (default: 'cv2')",
-    )
-    parser.add_argument(
-        "--camera-id",
-        type=str,
-        default="0",
-        help="Camera device ID (integer) or stream URL (string) for CV2 cameras. "
-        "Examples: '0' for first USB camera, 'rtsp://192.168.1.100:554/stream' for RTSP (default: '0')",
-    )
-    parser.add_argument(
-        "--camera-resolution",
-        type=str,
-        default="VGA",
-        help="Camera resolution: QVGA (320x240), VGA (640x480), SVGA (800x600), HD (1280x720), "
-        "FULL_HD (1920x1080), or WIDTHxHEIGHT format (default: VGA)",
-    )
-    parser.add_argument(
-        "--enable-depth",
-        action="store_true",
-        help="Enable depth streaming for RealSense cameras",
-    )
-    parser.add_argument(
-        "--depth-fps",
-        type=int,
-        default=30,
-        help="Depth stream FPS for RealSense cameras (default: 30)",
-    )
-    parser.add_argument(
-        "--depth-resolution",
-        type=str,
-        default=None,
-        help="Depth stream resolution for RealSense cameras (default: same as --camera-resolution)",
-    )
-    parser.add_argument(
-        "--depth-publish-interval",
-        type=int,
-        default=30,
-        help="Publish depth frame every N frames for RealSense cameras (default: 30)",
-    )
-    parser.add_argument(
-        "--camera-config",
-        type=str,
-        default=None,
-        help=f"Path to camera configuration JSON file. If provided, camera settings from the file "
-        f"will be used instead of CLI arguments.",
+        help="Follower serial port (override from setup.json)",
     )
     parser.add_argument(
         "--list-realsense",
         action="store_true",
         help="List available RealSense devices and exit",
+    )
+    parser.add_argument(
+        "--setup-path",
+        type=str,
+        default=None,
+        help="Path to setup.json (default: ~/.cyberwave/so101_lib/setup.json)",
     )
 
     args = parser.parse_args()
@@ -1386,6 +1515,7 @@ def main():
                 print(f"  USB Type: {dev.usb_type}")
                 print(f"  Sensors: {', '.join(dev.sensors)}")
 
+                # Get detailed info for color resolutions
                 detailed = RealSenseDiscovery.get_device_info(dev.serial_number)
                 if detailed:
                     color_res = detailed.get_color_resolutions()
@@ -1398,130 +1528,127 @@ def main():
     # Initialize Cyberwave client
     cyberwave_client = Cyberwave()
 
-    # Camera setup is optional - only configure when explicitly requested
-    # via --camera-uuid or --camera-config. Camera streaming is being moved
-    # to a separate codebase; this support is kept for backwards compatibility.
-    camera_config: Optional[RemoteoperateCameraConfig] = None
     camera_twin = None
+    cameras_list: List[Dict[str, Any]] = []
+    setup_config: Dict[str, Any] = {}
 
-    # Default camera values (only used when a camera twin is configured)
-    camera_type = args.camera_type
-    camera_fps = args.camera_fps
-    enable_depth = args.enable_depth
-    depth_fps = args.depth_fps
-    depth_publish_interval = args.depth_publish_interval
-    camera_id: Union[int, str] = args.camera_id
-    try:
-        camera_id = int(args.camera_id)
-    except ValueError:
-        pass  # Keep as string (URL)
-    camera_resolution = _parse_resolution(args.camera_resolution)
-    depth_resolution = _parse_resolution(args.depth_resolution) if args.depth_resolution else None
+    # Load setup.json by default when it exists (used for cameras, twin_uuid, ports)
+    setup_path = Path(args.setup_path) if args.setup_path else get_setup_config_path()
+    if setup_path.exists():
+        setup_config = load_setup_config(setup_path)
+        if setup_config:
+            print(f"Loaded setup from: {setup_path}")
 
-    if args.camera_config:
-        # Load from JSON file (highest priority)
-        if not os.path.exists(args.camera_config):
-            print(f"Error: Camera config file not found: {args.camera_config}")
-            sys.exit(1)
+    # All camera/remote config comes from setup.json (so101-setup)
+    max_relative_target = setup_config.get("max_relative_target")
 
-        try:
-            camera_config = RemoteoperateCameraConfig.load(args.camera_config)
-            print(f"Loaded camera config from: {args.camera_config}")
-            print(f"Config: {camera_config}")
-        except Exception as e:
-            print(f"Error loading camera config: {e}")
-            sys.exit(1)
+    # Default camera values (used when cameras_list is empty - no camera streaming)
+    camera_type = "cv2"
+    camera_fps = setup_config.get("camera_fps", 30)
+    enable_depth = False
+    depth_fps = 30
+    depth_publish_interval = 30
+    camera_id: Union[int, str] = 0
+    camera_resolution = Resolution.VGA
+    depth_resolution = None
 
-        # Use values from config file
-        camera_type = camera_config.camera_type
-        camera_id = camera_config.camera_id
-        camera_fps = camera_config.fps
-        camera_resolution = camera_config.get_resolution()
-        enable_depth = camera_config.enable_depth
-        depth_fps = camera_config.depth_fps
-        depth_resolution = camera_config.get_depth_resolution()
-        depth_publish_interval = camera_config.depth_publish_interval
+    # Use setup for cameras (always from setup)
+    if setup_config:
+        cameras_list = []
 
-        # Create camera twin if camera-uuid is also provided
-        if args.camera_uuid:
-            if camera_type == "realsense":
-                camera_asset = "intel/realsensed455"
-            else:
-                camera_asset = "cyberwave/standard-cam"
-            camera_twin = cyberwave_client.twin(
-                asset_key=camera_asset, twin_id=args.camera_uuid, name="camera"
-            )
-    elif args.camera_uuid:
-        # If camera-uuid is provided, auto-detect camera type from asset
-        # Try to detect camera type by fetching the twin with different asset keys
-        camera_asset = None
+        if setup_config.get("wrist_camera"):
+            uuid = setup_config.get("wrist_camera_twin_uuid")
+            if not uuid:
+                print("Error: wrist_camera_twin_uuid missing in setup config")
+                sys.exit(1)
+            twin = cyberwave_client.twin(twin_id=uuid)
+            wrist_fps = setup_config.get("camera_fps", 30)
+            cameras_list.append({
+                "twin": twin,
+                "camera_id": setup_config.get("wrist_camera_id", 0),
+                "camera_type": "cv2",
+                "camera_resolution": Resolution.VGA,
+                "camera_name": setup_config.get("wrist_camera_name", "wrist_camera"),
+                "fps": wrist_fps,
+                "fourcc": setup_config.get("wrist_camera_fourcc"),
+                "enable_depth": False,
+                "depth_fps": 30,
+                "depth_resolution": None,
+                "depth_publish_interval": 30,
+            })
 
-        # Try RealSense asset first
-        try:
-            camera_twin = cyberwave_client.twin(
-                asset_key="intel/realsensed455", twin_id=args.camera_uuid, name="camera"
-            )
-            camera_asset = "intel/realsensed455"
-        except Exception:
-            # Try standard-cam asset
-            try:
-                camera_twin = cyberwave_client.twin(
-                    asset_key="cyberwave/standard-cam", twin_id=args.camera_uuid, name="camera"
-                )
-                camera_asset = "cyberwave/standard-cam"
-            except Exception as e:
-                logger.debug(f"Could not fetch camera twin: {e}")
-                # Fall back to detecting from args.camera_type if available
-                if hasattr(args, "camera_type") and args.camera_type:
-                    if args.camera_type == "realsense":
-                        camera_asset = "intel/realsensed455"
-                    else:
-                        camera_asset = "cyberwave/standard-cam"
-                else:
-                    # Default to standard-cam if we can't determine
-                    camera_asset = "cyberwave/standard-cam"
-                # Create twin with detected/default asset
-                camera_twin = cyberwave_client.twin(
-                    asset_key=camera_asset, twin_id=args.camera_uuid, name="camera"
-                )
+        for add in setup_config.get("additional_cameras", []):
+            uuid = add.get("twin_uuid")
+            if not uuid:
+                print("Error: twin_uuid missing in additional_cameras entry")
+                sys.exit(1)
+            twin = cyberwave_client.twin(twin_id=uuid)
+            res = add.get("resolution", [640, 480])
+            cam_res = Resolution.from_size(res[0], res[1]) if len(res) >= 2 else Resolution.VGA
+            if cam_res is None:
+                cam_res = Resolution.closest(res[0], res[1]) if len(res) >= 2 else Resolution.VGA
+            depth_res = add.get("depth_resolution")
+            depth_res_enum = None
+            if depth_res and len(depth_res) >= 2:
+                depth_res_enum = Resolution.from_size(depth_res[0], depth_res[1]) or Resolution.closest(depth_res[0], depth_res[1])
+            cameras_list.append({
+                "twin": twin,
+                "camera_id": add.get("camera_id", 1),
+                "camera_type": add.get("camera_type", "cv2"),
+                "camera_resolution": cam_res,
+                "camera_name": add.get("camera_name", "external"),
+                "fps": add.get("fps", 30),
+                "fourcc": add.get("fourcc"),
+                "enable_depth": add.get("enable_depth", False),
+                "depth_fps": add.get("depth_fps", 30),
+                "depth_resolution": depth_res_enum,
+                "depth_publish_interval": add.get("depth_publish_interval", 30),
+            })
 
-        # Auto-detect camera type from asset and use defaults
-        if camera_asset is None:
-            camera_asset = "cyberwave/standard-cam"
+        if cameras_list:
+            camera_twin = cameras_list[0]["twin"]
+            camera_fps = cameras_list[0].get("fps", 30)
 
-        detected_type = _detect_camera_type_from_asset(camera_asset)
-        camera_config = _get_default_camera_config(detected_type)
-
-        camera_type = camera_config.camera_type
-        camera_id = camera_config.camera_id
-        camera_fps = camera_config.fps
-        camera_resolution = camera_config.get_resolution()
-        enable_depth = camera_config.enable_depth
-        depth_fps = camera_config.depth_fps
-        depth_resolution = camera_config.get_depth_resolution()
-        depth_publish_interval = camera_config.depth_publish_interval
-
-        logger.info(
-            f"Auto-detected camera type '{detected_type}' from asset '{camera_asset}', using default settings"
+    # Resolve twin UUID and ports: CLI/env > setup.json (so remoteoperate works with no args when setup exists)
+    effective_twin_uuid = args.twin_uuid or setup_config.get("twin_uuid") or setup_config.get(
+        "wrist_camera_twin_uuid"
+    )
+    effective_follower_port = args.follower_port or setup_config.get("follower_port")
+    if not effective_twin_uuid:
+        print(
+            "Error: Twin UUID required. Use --twin-uuid, set CYBERWAVE_TWIN_UUID, "
+            "or run so101-setup with --twin-uuid"
         )
+        sys.exit(1)
+
+    # Follower required for remote operation
+    if not effective_follower_port:
+        print(
+            "Error: Follower port required. Calibrate follower first (so101-calibrate) to save port, "
+            "or pass --follower-port / set CYBERWAVE_METADATA_FOLLOWER_PORT"
+        )
+        sys.exit(1)
 
     robot = cyberwave_client.twin(
-        asset_key="the-robot-studio/so101", twin_id=args.twin_uuid, name="robot"
+        asset_key="the-robot-studio/so101", twin_id=effective_twin_uuid, name="robot"
     )
-    camera = camera_twin
+    # Pass cameras list when we have configs (single or multi), else single camera for backward compat
+    camera = camera_twin if not cameras_list else None
+    cameras = cameras_list if cameras_list else None
+    mqtt_client = cyberwave_client.mqtt
 
     # Initialize follower
     from config import FollowerConfig
 
-    # Only configure cameras on the follower if a camera twin is being used
+    # Only configure cameras on the follower if camera(s) are being used
     follower_cameras = None
-    if camera_twin is not None:
-        follower_cameras = [camera_id] if isinstance(camera_id, int) else [0]
+    if cameras_list:
+        # Support both int (device index) and str (URL) for camera_id
+        follower_cameras = [cfg["camera_id"] for cfg in cameras_list]
 
     follower_config = FollowerConfig(
-        port=args.follower_port,
-        max_relative_target=args.max_relative_target,
-        id=args.follower_id,
+        port=effective_follower_port,
+        max_relative_target=max_relative_target,
         cameras=follower_cameras,
     )
     follower = SO101Follower(config=follower_config)
@@ -1533,6 +1660,7 @@ def main():
             follower=follower,
             robot=robot,
             camera=camera,
+            cameras=cameras,
             camera_fps=camera_fps,
             camera_type=camera_type,
             camera_id=camera_id,
@@ -1546,7 +1674,6 @@ def main():
         if follower is not None:
             follower.disconnect()
         # Disconnect MQTT client
-        mqtt_client = cyberwave_client.mqtt
         if mqtt_client is not None and mqtt_client.connected:
             mqtt_client.disconnect()
 
