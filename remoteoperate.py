@@ -1043,100 +1043,160 @@ def _create_joint_state_callback(
                 return
 
             # Extract joint index/name and position from data
-            # Message format:
-            # {"joint_name": "5", "joint_state": {"position": -1.22, "velocity": 0, "effort": 0}, "timestamp": ...}
+            # Supported formats:
+            # 1) Single joint: {"joint_name": "5", "joint_state": {"position": -1.22}, "timestamp": ...}
+            # 2) Multi-joint: {"source_type": "sim", "shoulder_pan": 1.5, "shoulder_lift": 0.3, ...}
 
-            # Extract joint_name and joint_state
-            if "joint_name" not in data or "joint_state" not in data:
-                if status_tracker:
-                    status_tracker.increment_errors()
+            if "joint_name" in data and "joint_state" in data:
+                # Format 1: single joint
+                _process_single_joint_update(
+                    data, current_state, action_queue, joint_index_to_name,
+                    joint_name_to_norm_mode, follower, follower_calibration, status_tracker,
+                )
                 return
 
-            joint_name_str = data.get("joint_name")
-            joint_state = data.get("joint_state", {})
-            position_radians = joint_state.get("position")
+            # Format 2: multi-joint (direct joint name -> position)
+            # Build one action with all joints, then put in queue
+            action = current_state.copy()
+            joint_states_for_status = {}
+            any_valid = False
+            for joint_name, position_val in data.items():
+                if joint_name in ("source_type", "timestamp", "session_id", "type"):
+                    continue
+                if joint_name not in follower.motors:
+                    continue
+                try:
+                    position_radians = float(position_val)
+                except (ValueError, TypeError):
+                    continue
 
-            if position_radians is None:
+                norm_mode = joint_name_to_norm_mode.get(joint_name)
+                if norm_mode is None:
+                    continue
+                calib = follower_calibration.get(joint_name) if follower_calibration else None
+                normalized_position = _radians_to_normalized(position_radians, norm_mode, calib)
+                motor_id = follower.motors[joint_name].id
+                is_valid, _ = validate_position(motor_id, normalized_position)
+                if not is_valid:
+                    if status_tracker:
+                        status_tracker.increment_filtered()
+                    continue
+
+                action[f"{joint_name}.pos"] = normalized_position
+                current_state[f"{joint_name}.pos"] = normalized_position
+                joint_states_for_status[str(motor_id)] = position_radians
+                any_valid = True
+
+            if any_valid:
                 if status_tracker:
-                    status_tracker.increment_errors()
-                return
-
-            # Convert joint_name to joint_index
-            # joint_name is a string like "5" (joint index) or could be a joint name like "shoulder_pan"
-            joint_index = None  # Initialize before try block
-            try:
-                joint_index = int(joint_name_str)
-            except (ValueError, TypeError):
-                # Try to find joint by name (reverse lookup)
-                for idx, name in joint_index_to_name.items():
-                    if name == joint_name_str:
-                        joint_index = idx
-                        break
-                if joint_index is None:
+                    status_tracker.update_joint_states(joint_states_for_status)
+                try:
+                    action_queue.put_nowait(action)
+                except queue.Full:
                     if status_tracker:
                         status_tracker.increment_errors()
-                    return
-
-            # Get joint name from index
-            joint_name = joint_index_to_name.get(joint_index)
-            if joint_name is None:
-                if status_tracker:
-                    status_tracker.increment_errors()
-                return
-
-            # Convert position_radians to float
-            try:
-                position_radians = float(position_radians)
-            except (ValueError, TypeError):
-                if status_tracker:
-                    status_tracker.increment_errors()
-                return
-
-            # Get normalization mode for this joint
-            norm_mode = joint_name_to_norm_mode.get(joint_name)
-            if norm_mode is None:
-                if status_tracker:
-                    status_tracker.increment_errors()
-                return
-
-            # Get calibration for this joint (if available)
-            calib = follower_calibration.get(joint_name) if follower_calibration else None
-
-            # Convert radians to normalized position using calibration
-            normalized_position = _radians_to_normalized(position_radians, norm_mode, calib)
-
-            # Validate position
-            motor_id = follower.motors[joint_name].id
-            is_valid, error_msg = validate_position(motor_id, normalized_position)
-            if not is_valid:
-                if status_tracker:
-                    status_tracker.increment_filtered()
-                return
-
-            # Update current state (merge with previous state)
-            # Create full action state by taking current state and updating the changed joint
-            action = current_state.copy()
-            action[f"{joint_name}.pos"] = normalized_position
-            # Also update the current_state dictionary
-            current_state[f"{joint_name}.pos"] = normalized_position
-
-            # Update joint states in status tracker (store radians for display)
-            if status_tracker:
-                joint_states = {str(joint_index): position_radians}
-                status_tracker.update_joint_states(joint_states)
-
-            # Put action in queue (non-blocking)
-            try:
-                action_queue.put_nowait(action)
-            except queue.Full:
-                if status_tracker:
-                    status_tracker.increment_errors()
 
         except Exception:
             if status_tracker:
                 status_tracker.increment_errors()
 
     return callback
+
+
+def _apply_joint_position(
+    joint_name: str,
+    position_radians: float,
+    current_state: Dict[str, float],
+    action_queue: queue.Queue,
+    joint_index_to_name: Dict[int, str],
+    joint_name_to_norm_mode: Dict[str, MotorNormMode],
+    follower: SO101Follower,
+    follower_calibration: Optional[Dict[str, Any]],
+    status_tracker: Optional[StatusTracker],
+) -> None:
+    """Apply a single joint position to the action queue."""
+    norm_mode = joint_name_to_norm_mode.get(joint_name)
+    if norm_mode is None:
+        return
+    calib = follower_calibration.get(joint_name) if follower_calibration else None
+    normalized_position = _radians_to_normalized(position_radians, norm_mode, calib)
+    motor_id = follower.motors[joint_name].id
+    is_valid, _ = validate_position(motor_id, normalized_position)
+    if not is_valid:
+        if status_tracker:
+            status_tracker.increment_filtered()
+        return
+    action = current_state.copy()
+    action[f"{joint_name}.pos"] = normalized_position
+    current_state[f"{joint_name}.pos"] = normalized_position
+    if status_tracker:
+        joint_states = {str(motor_id): position_radians}
+        status_tracker.update_joint_states(joint_states)
+    try:
+        action_queue.put_nowait(action)
+    except queue.Full:
+        if status_tracker:
+            status_tracker.increment_errors()
+
+
+def _process_single_joint_update(
+    data: Dict,
+    current_state: Dict[str, float],
+    action_queue: queue.Queue,
+    joint_index_to_name: Dict[int, str],
+    joint_name_to_norm_mode: Dict[str, MotorNormMode],
+    follower: SO101Follower,
+    follower_calibration: Optional[Dict[str, Any]],
+    status_tracker: Optional[StatusTracker],
+) -> None:
+    """Process single-joint format: joint_name + joint_state."""
+    joint_name_str = data.get("joint_name")
+    joint_state = data.get("joint_state", {})
+    position_radians = joint_state.get("position")
+
+    if position_radians is None:
+        if status_tracker:
+            status_tracker.increment_errors()
+        return
+
+    # Convert joint_name to joint_index (e.g. "5" or "shoulder_pan")
+    joint_index = None
+    try:
+        joint_index = int(joint_name_str)
+    except (ValueError, TypeError):
+        for idx, name in joint_index_to_name.items():
+            if name == joint_name_str:
+                joint_index = idx
+                break
+        if joint_index is None:
+            if status_tracker:
+                status_tracker.increment_errors()
+            return
+
+    joint_name = joint_index_to_name.get(joint_index)
+    if joint_name is None:
+        if status_tracker:
+            status_tracker.increment_errors()
+        return
+
+    try:
+        position_radians = float(position_radians)
+    except (ValueError, TypeError):
+        if status_tracker:
+            status_tracker.increment_errors()
+        return
+
+    _apply_joint_position(
+        joint_name=joint_name,
+        position_radians=position_radians,
+        current_state=current_state,
+        action_queue=action_queue,
+        joint_index_to_name=joint_index_to_name,
+        joint_name_to_norm_mode=joint_name_to_norm_mode,
+        follower=follower,
+        follower_calibration=follower_calibration,
+        status_tracker=status_tracker,
+    )
 
 
 CONTROL_RATE_HZ = 100
