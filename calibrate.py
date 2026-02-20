@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from config import FollowerConfig, LeaderConfig
 from follower import SO101Follower
 from leader import SO101Leader
-from so101_setup import update_setup_port
+from cw_setup import update_setup_port
 from utils import find_port, setup_logging
 
 logger = logging.getLogger(__name__)
