@@ -822,6 +822,96 @@ def _radians_to_normalized(
             return radians
 
 
+def _joint_position_heartbeat_thread(
+    follower: SO101Follower,
+    mqtt_client: Any,
+    twin_uuid: str,
+    joint_name_to_norm_mode: Dict[str, MotorNormMode],
+    follower_calibration: Optional[Dict[str, Any]],
+    motor_id_to_schema_joint: Dict[int, str],
+    stop_event: threading.Event,
+    interval: float = 1.0,
+) -> None:
+    """
+    Thread that publishes the follower's current joint positions via MQTT every second.
+
+    Keeps the remote operator in sync with the actual follower position to avoid mismatches.
+
+    Args:
+        follower: SO101Follower instance
+        mqtt_client: MQTT client for publishing
+        twin_uuid: Twin UUID
+        joint_name_to_norm_mode: Mapping from joint name to normalization mode
+        follower_calibration: Calibration data for converting normalized to radians
+        motor_id_to_schema_joint: Mapping from motor ID to schema joint name (e.g. 1 -> "_1")
+        stop_event: Event to signal thread to stop
+        interval: Publish interval in seconds (default: 1.0)
+    """
+    while not stop_event.is_set():
+        try:
+            if not mqtt_client or not mqtt_client.connected:
+                time.sleep(interval)
+                continue
+
+            follower_obs = follower.get_observation()
+            if not follower_obs:
+                time.sleep(interval)
+                continue
+
+            joint_positions: Dict[str, float] = {}
+            for joint_key, normalized_pos in follower_obs.items():
+                name = joint_key.removesuffix(".pos")
+                if name not in follower.motors:
+                    continue
+                joint_index = follower.motors[name].id
+                norm_mode = joint_name_to_norm_mode.get(name)
+                if norm_mode is None:
+                    continue
+
+                if follower_calibration and name in follower_calibration:
+                    calib = follower_calibration[name]
+                    r_min = calib.range_min
+                    r_max = calib.range_max
+                    delta_r = (r_max - r_min) / 2.0
+
+                    if norm_mode == MotorNormMode.RANGE_M100_100:
+                        raw_offset = (normalized_pos / 100.0) * delta_r
+                        radians = raw_offset * (2.0 * math.pi / 4095.0)
+                    elif norm_mode == MotorNormMode.RANGE_0_100:
+                        delta_r_full = r_max - r_min
+                        raw_value = r_min + (normalized_pos / 100.0) * delta_r_full
+                        radians = (raw_value - r_min) * (2.0 * math.pi / 4095.0)
+                    else:
+                        radians = normalized_pos * math.pi / 180.0
+                else:
+                    if norm_mode == MotorNormMode.RANGE_M100_100:
+                        degrees = (normalized_pos / 100.0) * 180.0
+                        radians = degrees * math.pi / 180.0
+                    elif norm_mode == MotorNormMode.RANGE_0_100:
+                        degrees = (normalized_pos / 100.0) * 360.0
+                        radians = degrees * math.pi / 180.0
+                    else:
+                        radians = normalized_pos * math.pi / 180.0
+
+                schema_joint = motor_id_to_schema_joint.get(
+                    joint_index, f"_{joint_index}"
+                )
+                joint_positions[schema_joint] = radians
+
+            if joint_positions:
+                timestamp = time.time()
+                for schema_joint, radians in joint_positions.items():
+                    mqtt_client.update_joint_state(
+                        twin_uuid=twin_uuid,
+                        joint_name=schema_joint,
+                        position=radians,
+                        timestamp=timestamp,
+                    )
+        except Exception:
+            pass
+        time.sleep(interval)
+
+
 def _keyboard_input_thread(stop_event: threading.Event) -> None:
     """
     Thread to monitor keyboard input for 'q' key to stop the loop gracefully.
@@ -1329,6 +1419,22 @@ def remoteoperate(
     # Create mapping from joint names to normalization modes
     joint_name_to_norm_mode = {name: motor.norm_mode for name, motor in follower.motors.items()}
 
+    # Build motor_id -> schema joint name mapping (e.g. 1 -> "_1") for MQTT publish
+    motor_id_to_schema_joint: Dict[int, str] = {}
+    try:
+        schema_joint_names = robot.get_controllable_joint_names()
+        for _, motor in follower.motors.items():
+            motor_id = motor.id
+            idx = motor_id - 1
+            if idx < len(schema_joint_names):
+                motor_id_to_schema_joint[motor_id] = schema_joint_names[idx]
+            else:
+                motor_id_to_schema_joint[motor_id] = f"_{motor_id}"
+    except Exception:
+        motor_id_to_schema_joint = {
+            motor.id: f"_{motor.id}" for _, motor in follower.motors.items()
+        }
+
     # Initialize current state with follower's current observation
     current_state: Dict[str, float] = {}
     initial_joint_states_radians: Dict[str, float] = {}  # For status display
@@ -1475,6 +1581,23 @@ def remoteoperate(
     )
     status_thread.start()
 
+    # Start joint position heartbeat thread - publish follower position every second to avoid mismatches
+    heartbeat_thread = threading.Thread(
+        target=_joint_position_heartbeat_thread,
+        args=(
+            follower,
+            mqtt_client,
+            twin_uuid,
+            joint_name_to_norm_mode,
+            follower_calibration,
+            motor_id_to_schema_joint,
+            stop_event,
+        ),
+        kwargs={"interval": 1.0},
+        daemon=True,
+    )
+    heartbeat_thread.start()
+
     # Start camera streaming via SDK CameraStreamManager (one stream per twin, each with own thread)
     camera_manager: Optional[CameraStreamManager] = None
     if camera_twins and client is not None:
@@ -1588,6 +1711,9 @@ def remoteoperate(
 
         # Wait for writer thread to finish
         writer_thread.join(timeout=1.0)
+
+        # Wait for heartbeat thread
+        heartbeat_thread.join(timeout=1.0)
 
         # Stop camera streaming
         if camera_manager is not None:
