@@ -761,13 +761,13 @@ so101-calibrate --type leader --port /dev/ttyACM0
 If you see errors about missing Cyberwave token:
 
 ```
-ValueError: No CYBERWAVE_API_KEY found! Get yours at https://cyberwave.com/profile
+ValueError: No CYBERWAVE_TOKEN found! Get yours at https://cyberwave.com/profile
 ```
 
 Set the required environment variable:
 
 ```bash
-export CYBERWAVE_API_KEY=your_token_here
+export CYBERWAVE_TOKEN=your_token_here
 ```
 
 Get your token from [https://cyberwave.com/profile](https://cyberwave.com/profile)
