@@ -399,11 +399,11 @@ def start_localop(client: Cyberwave, twin_uuid: str, controller: dict) -> None:
 
 
 async def main() -> None:
-    token = os.getenv("CYBERWAVE_TOKEN")
+    token = os.getenv("CYBERWAVE_API_KEY")
     twin_uuid = os.getenv("CYBERWAVE_TWIN_UUID")
 
     if not token:
-        logger.error("CYBERWAVE_TOKEN environment variable is required")
+        logger.error("CYBERWAVE_API_KEY environment variable is required")
         sys.exit(1)
     if not twin_uuid:
         logger.error("CYBERWAVE_TWIN_UUID environment variable is required")

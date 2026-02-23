@@ -85,14 +85,14 @@ pip install -e .
 For Cyberwave integration, set the following environment variables:
 
 ```bash
-export CYBERWAVE_TOKEN=your_token_here
+export CYBERWAVE_API_KEY=your_token_here
 export CYBERWAVE_ENVIRONMENT_ID=your_environment_uuid  # Optional
 ```
 
 You can add these to your `~/.bashrc` or `~/.zshrc` to make them persistent:
 
 ```bash
-echo 'export CYBERWAVE_TOKEN=your_token_here' >> ~/.bashrc
+echo 'export CYBERWAVE_API_KEY=your_token_here' >> ~/.bashrc
 echo 'export CYBERWAVE_ENVIRONMENT_ID=your_environment_uuid' >> ~/.bashrc
 source ~/.bashrc
 ```
@@ -104,7 +104,7 @@ source ~/.bashrc
 Before using Cyberwave integration, set your API token and optionally environment UUID:
 
 ```bash
-export CYBERWAVE_TOKEN=your_token_here
+export CYBERWAVE_API_KEY=your_token_here
 export CYBERWAVE_ENVIRONMENT_ID=your_environment_uuid  # Optional
 ```
 
@@ -253,11 +253,11 @@ so101-calibrate --type follower --port /dev/ttyACM1
 
 Run teleoperation loop with Cyberwave integration and camera streaming.
 
-**Note:** Requires `CYBERWAVE_TOKEN` environment variable to be set.
+**Note:** Requires `CYBERWAVE_API_KEY` environment variable to be set.
 
 ```bash
 # Set environment variable first
-export CYBERWAVE_TOKEN=your_token_here
+export CYBERWAVE_API_KEY=your_token_here
 
 # Basic teleoperation with CV2 USB camera (twin will be created automatically)
 so101-teleoperate \
@@ -405,7 +405,7 @@ The same camera configuration file can be used with both `so101-teleoperate` and
 
 Run remote operation loop: receive joint states via MQTT and write to follower motors.
 
-**Note:** Requires `CYBERWAVE_TOKEN` environment variable to be set.
+**Note:** Requires `CYBERWAVE_API_KEY` environment variable to be set.
 
 ```bash
 # Basic remote operation with CV2 camera (twin will be created automatically)
@@ -503,7 +503,7 @@ from teleoperate import teleoperate
 from cyberwave import Cyberwave
 from cyberwave.sensor import Resolution
 
-# Initialize Cyberwave client (reads token from CYBERWAVE_TOKEN env var)
+# Initialize Cyberwave client (reads token from CYBERWAVE_API_KEY env var)
 cyberwave_client = Cyberwave()
 robot = cyberwave_client.twin(asset_key="the-robot-studio/so101", twin_id="YOUR_TWIN_UUID", name="robot")
 camera = cyberwave_client.twin(asset_key="cyberwave/standard-cam", twin_id="YOUR_TWIN_UUID", name="camera")
@@ -761,13 +761,13 @@ so101-calibrate --type leader --port /dev/ttyACM0
 If you see errors about missing Cyberwave token:
 
 ```
-ValueError: No CYBERWAVE_TOKEN found! Get yours at https://cyberwave.com/profile
+ValueError: No CYBERWAVE_API_KEY found! Get yours at https://cyberwave.com/profile
 ```
 
 Set the required environment variable:
 
 ```bash
-export CYBERWAVE_TOKEN=your_token_here
+export CYBERWAVE_API_KEY=your_token_here
 ```
 
 Get your token from [https://cyberwave.com/profile](https://cyberwave.com/profile)
