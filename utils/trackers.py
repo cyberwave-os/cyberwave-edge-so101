@@ -248,33 +248,55 @@ def run_status_logging_thread(
             # Joint states
             index_to_name = status_tracker.joint_index_to_name
             joint_states = status["joint_states"]
+            joint_temps = status["joint_temperatures"]
+
+            def _format_motor_line(
+                joint_index: str,
+                joint_name: str,
+                position: Optional[float],
+                mode: str,
+                temps: Dict[str, float],
+            ) -> str:
+                pos_str = f"{position:6.3f}rad" if position is not None else "   waiting"
+                if mode == "teleoperate":
+                    leader_temp = temps.get(f"leader_{joint_index}")
+                    follower_temp = temps.get(f"follower_{joint_index}")
+                    temp_parts = []
+                    if leader_temp is not None:
+                        leader_indicator = "🔥" if leader_temp > 40 else ""
+                        temp_parts.append(f"L:{leader_temp:3.0f}°C{leader_indicator}")
+                    if follower_temp is not None:
+                        follower_indicator = "🔥" if follower_temp > 40 else ""
+                        temp_parts.append(f"F:{follower_temp:3.0f}°C{follower_indicator}")
+                    temp_str = " ".join(temp_parts) if temp_parts else "N/A"
+                else:
+                    follower_temp = temps.get(f"follower_{joint_index}")
+                    temp_str = "N/A"
+                    if follower_temp is not None:
+                        follower_indicator = "🔥" if follower_temp > 40 else ""
+                        temp_str = f"F:{follower_temp:3.0f}°C{follower_indicator}"
+                return f"  {joint_name:16s}  pos={pos_str:>10s}  {temp_str}"
+
             if joint_states:
                 lines.append("Motors:".ljust(70))
                 for joint_index in sorted(joint_states.keys()):
                     position = joint_states[joint_index]
                     joint_name = index_to_name.get(joint_index, joint_index)
-                    joint_temps = status["joint_temperatures"]
-
-                    if mode == "teleoperate":
-                        leader_temp = joint_temps.get(f"leader_{joint_index}")
-                        follower_temp = joint_temps.get(f"follower_{joint_index}")
-                        temp_parts = []
-                        if leader_temp is not None:
-                            leader_indicator = "🔥" if leader_temp > 40 else ""
-                            temp_parts.append(f"L:{leader_temp:3.0f}°C{leader_indicator}")
-                        if follower_temp is not None:
-                            follower_indicator = "🔥" if follower_temp > 40 else ""
-                            temp_parts.append(f"F:{follower_temp:3.0f}°C{follower_indicator}")
-                        temp_str = " ".join(temp_parts) if temp_parts else "N/A"
-                    else:
-                        follower_temp = joint_temps.get(f"follower_{joint_index}")
-                        temp_str = "N/A"
-                        if follower_temp is not None:
-                            follower_indicator = "🔥" if follower_temp > 40 else ""
-                            temp_str = f"F:{follower_temp:3.0f}°C{follower_indicator}"
-
-                    line = f"  {joint_name:16s}  pos={position:6.3f}rad  {temp_str}"
-                    lines.append(line[:70].ljust(70))
+                    lines.append(
+                        _format_motor_line(
+                            joint_index, joint_name, position, mode, joint_temps
+                        )[:70].ljust(70)
+                    )
+            elif index_to_name:
+                # Show motor names with "waiting" for position when no joint_states yet
+                lines.append("Motors:".ljust(70))
+                for joint_index in sorted(index_to_name.keys()):
+                    joint_name = index_to_name[joint_index]
+                    lines.append(
+                        _format_motor_line(
+                            joint_index, joint_name, None, mode, joint_temps
+                        )[:70].ljust(70)
+                    )
             else:
                 lines.append(
                     ("Motors: (waiting)" if mode == "teleoperate" else "Motors:").ljust(70)
