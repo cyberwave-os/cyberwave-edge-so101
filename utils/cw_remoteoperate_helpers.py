@@ -15,8 +15,11 @@ from motors import MotorNormMode
 from scripts.cw_write_position import validate_position
 from so101.follower import SO101Follower
 from so101.leader import SO101Leader
+from utils.cw_alerts import (
+    create_calibration_needed_alert,
+    create_calibration_upload_failed_alert,
+)
 from utils.trackers import StatusTracker
-from utils.cw_alerts import create_calibration_needed_alert
 from utils.utils import (
     calibration_range_to_radians,
     ensure_safe_goal_position,
@@ -410,12 +413,19 @@ def upload_calibration_to_twin(
 
     Maps device motor IDs to the twin's schema joint names (from get_controllable_joint_names).
     The backend expects joint names matching the asset kinematics, not motor IDs.
+
+    API endpoint: POST /api/v1/twins/{uuid}/calibration
     """
     try:
         calibration_path = device.config.calibration_dir / f"{device.config.id}.json"
 
         if not calibration_path.exists():
-            logger.debug(f"No calibration file found at {calibration_path}, skipping upload")
+            msg = (
+                f"No calibration file at {calibration_path}, skipping upload. "
+                "Run so101-calibrate first."
+            )
+            logger.warning(msg)
+            print(f"[calibration] {msg}")
             return
 
         calib_data = load_calibration(calibration_path)
@@ -462,19 +472,36 @@ def upload_calibration_to_twin(
                 "upper": upper_rad,
             }
 
-        logger.info(f"Uploading {robot_type} calibration to twin {twin.uuid}...")
+        base_url = getattr(getattr(twin.client, "config", None), "base_url", "?")
+        endpoint = f"{base_url}/api/v1/twins/{twin.uuid}/calibration"
+        logger.info(
+            "Uploading %s calibration to twin %s via POST %s",
+            robot_type,
+            twin.uuid,
+            endpoint,
+        )
+        print(f"[calibration] POST {endpoint} ({len(joint_calibration)} joints)")
         twin.update_calibration(joint_calibration, robot_type=robot_type)
-        logger.info(f"Calibration uploaded successfully to twin {twin.uuid}")
-    except ImportError:
-        logger.warning(
+        logger.info("Calibration uploaded successfully to twin %s", twin.uuid)
+        print(f"[calibration] Uploaded successfully to twin {twin.uuid}")
+    except ImportError as e:
+        msg = (
             "Cyberwave SDK not installed. Skipping calibration upload. "
             "Install with: pip install cyberwave"
         )
+        logger.warning(msg)
+        print(f"[calibration] {msg}")
+        create_calibration_upload_failed_alert(twin, robot_type, e)
     except Exception as e:
         logger.warning(
             "Failed to upload calibration: %s. Check logs for details.", e
         )
         logger.exception("Calibration upload failed, continuing without upload")
+        print(
+            f"[calibration] failed: {e} "
+            "(check API key, base URL, and joint count matches twin schema)"
+        )
+        create_calibration_upload_failed_alert(twin, robot_type, e)
 
 
 def check_calibration_required(

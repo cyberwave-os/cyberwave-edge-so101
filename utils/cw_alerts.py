@@ -116,6 +116,41 @@ def create_mqtt_disconnected_alert(twin: Twin) -> bool:
         return False
 
 
+def create_calibration_upload_failed_alert(
+    twin: Twin,
+    device: str,
+    error: Exception,
+) -> bool:
+    """
+    Create an alert when calibration upload to the twin fails.
+
+    Args:
+        twin: Twin instance with alerts
+        device: "leader" or "follower"
+        error: The exception that caused the failure
+
+    Returns:
+        True if alert was created
+    """
+    alert_key = f"calibration_upload_failed_{device}"
+    if not _should_create_alert(alert_key, _ERROR_ALERT_THROTTLE):
+        return False
+
+    try:
+        twin.alerts.create(
+            name=f"{device.capitalize()} calibration upload failed",
+            description=str(error),
+            alert_type="calibration_upload_failed",
+            severity="error",
+            source_type="edge",
+        )
+        logger.info(f"Created calibration upload failed alert for {device}: {error}")
+        return True
+    except Exception as e:
+        _log_alert_failure("calibration_upload_failed", e)
+        return False
+
+
 def create_calibration_needed_alert(
     twin: Twin,
     device: str,
