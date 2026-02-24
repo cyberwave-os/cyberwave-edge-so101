@@ -1,20 +1,21 @@
 """Alert helpers for SO101 edge scripts (teleoperate, remoteoperate)."""
 
 import logging
+import sys
 import threading
 import time
-from typing import Dict
-
-from cyberwave import Twin
+from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
 # Throttle: minimum seconds between creating the same alert type
-_TEMP_ALERT_THROTTLE = 1.0  # 10 seconds per joint
+_TEMP_ALERT_THROTTLE = 2.0  # 5 minutes per joint
 _MQTT_ALERT_THROTTLE = 300.0  # 5 minutes
 _ERROR_ALERT_THROTTLE = 300.0  # 5 minutes
+_SESSION_ALERT_THROTTLE = 3600.0  # 1 hour (once per session)
 
 _last_alert_times: Dict[str, float] = {}
+_session_alert_fired = False
 _alert_lock = threading.Lock()
 
 
@@ -29,14 +30,61 @@ def _should_create_alert(alert_key: str, throttle_seconds: float) -> bool:
         return True
 
 
+def _log_alert_failure(alert_type: str, exc: Exception) -> None:
+    """Log alert creation failure. Uses stderr so it shows even when logging is disabled."""
+    msg = f"Alert creation failed ({alert_type}): {exc}"
+    logger.warning(msg)
+    try:
+        print(msg, file=sys.stderr, flush=True)
+    except OSError:
+        pass
+
+
+def create_session_started_alert(
+    robot: Any,
+    mode: str,
+) -> bool:
+    """
+    Create a session-started alert once when the edge script connects.
+
+    Use this to verify the alert pipeline works. Fires once per process.
+
+    Args:
+        robot: Twin instance with alerts
+        mode: "teleoperate" or "remoteoperate"
+
+    Returns:
+        True if alert was created
+    """
+    global _session_alert_fired
+    with _alert_lock:
+        if _session_alert_fired:
+            return False
+        _session_alert_fired = True
+
+    try:
+        robot.alerts.create(
+            name=f"SO101 {mode} session started",
+            description=f"Edge device connected and running {mode}",
+            alert_type="edge_session_started",
+            severity="info",
+            source_type="edge",
+        )
+        logger.info(f"Created session started alert ({mode})")
+        return True
+    except Exception as e:
+        _log_alert_failure("session_started", e)
+        return False
+
+
 def create_temperature_alert(
-    robot: Twin,
+    robot: Any,
     joint_name: str,
     device: str,
     temperature: float,
     *,
-    warning_threshold: float = 22.0,
-    critical_threshold: float = 50.0,
+    warning_threshold: float = 55.0,
+    critical_threshold: float = 65.0,
 ) -> bool:
     """
     Create a motor overheating alert if temperature exceeds thresholds.
@@ -69,14 +117,14 @@ def create_temperature_alert(
             severity=severity,
             source_type="edge",
         )
-        logger.warning(f"Created {severity} alert: {joint_name} ({device}) at {temperature:.0f}°C")
+        logger.info(f"Created {severity} alert: {joint_name} ({device}) at {temperature:.0f}°C")
         return True
     except Exception as e:
-        logger.warning(f"Failed to create temperature alert: {e}")
+        _log_alert_failure("temperature", e)
         return False
 
 
-def create_mqtt_disconnected_alert(robot: Twin) -> bool:
+def create_mqtt_disconnected_alert(robot: Any) -> bool:
     """
     Create an alert when MQTT is disconnected.
 
@@ -98,15 +146,15 @@ def create_mqtt_disconnected_alert(robot: Twin) -> bool:
             severity="error",
             source_type="edge",
         )
-        logger.warning("Created MQTT disconnected alert")
+        logger.info("Created MQTT disconnected alert")
         return True
     except Exception as e:
-        logger.warning(f"Failed to create MQTT alert: {e}")
+        _log_alert_failure("mqtt_disconnected", e)
         return False
 
 
 def create_calibration_needed_alert(
-    robot: Twin,
+    robot: Any,
     device: str,
     *,
     description: str = "",
@@ -130,15 +178,15 @@ def create_calibration_needed_alert(
             severity="warning",
             source_type="edge",
         )
-        logger.warning(f"Created calibration needed alert for {device}")
+        logger.info(f"Created calibration needed alert for {device}")
         return True
     except Exception as e:
-        logger.warning(f"Failed to create calibration alert: {e}")
+        _log_alert_failure("calibration_needed", e)
         return False
 
 
 def create_high_error_rate_alert(
-    robot: Twin,
+    robot: Any,
     error_count: int,
     *,
     threshold: int = 100,
@@ -169,8 +217,8 @@ def create_high_error_rate_alert(
             severity="warning",
             source_type="edge",
         )
-        logger.warning(f"Created high error rate alert: {error_count} errors")
+        logger.info(f"Created high error rate alert: {error_count} errors")
         return True
     except Exception as e:
-        logger.warning(f"Failed to create error rate alert: {e}")
+        _log_alert_failure("high_error_rate", e)
         return False
