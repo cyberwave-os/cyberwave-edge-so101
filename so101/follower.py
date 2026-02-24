@@ -4,7 +4,6 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from so101.robot import SO101Robot
 from serial.serialutil import SerialException
 
 from motors import (
@@ -12,9 +11,10 @@ from motors import (
     MotorCalibration,
 )
 from motors.tables import MODE_POSITION
-from utils.utils import load_calibration
+from so101.robot import SO101Robot
 from utils.config import FollowerConfig
 from utils.errors import DeviceNotConnectedError
+from utils.utils import load_calibration
 
 logger = logging.getLogger(__name__)
 
@@ -207,32 +207,36 @@ class SO101Follower(SO101Robot):
         if self.config.max_relative_target is not None:
             try:
                 present_pos = self.bus.sync_read("Present_Position", normalize=True)
-                goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in goal_pos.items()}
+                goal_present_pos = {
+                    key: (g_pos, present_pos[key]) for key, g_pos in goal_pos.items()
+                }
                 from utils.utils import ensure_safe_goal_position
 
-                goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
+                goal_pos = ensure_safe_goal_position(
+                    goal_present_pos, self.config.max_relative_target
+                )
             except SerialException as e:
-                logger.warning(f"Serial communication error reading follower positions for safety check: {e}. Skipping safety check.")
+                logger.warning(
+                    f"Serial communication error reading follower positions for safety check: {e}. Skipping safety check."
+                )
                 # Use last known positions if available for safety check
                 if self._current_positions:
-                    present_pos = {k.removesuffix(".pos"): v for k, v in self._current_positions.items()}
-                    goal_present_pos = {key: (g_pos, present_pos.get(key, g_pos)) for key, g_pos in goal_pos.items()}
+                    present_pos = {
+                        k.removesuffix(".pos"): v for k, v in self._current_positions.items()
+                    }
+                    goal_present_pos = {
+                        key: (g_pos, present_pos.get(key, g_pos)) for key, g_pos in goal_pos.items()
+                    }
                     from utils.utils import ensure_safe_goal_position
-                    goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
+
+                    goal_pos = ensure_safe_goal_position(
+                        goal_present_pos, self.config.max_relative_target
+                    )
 
         # Send goal position to the arm (bus handles normalization automatically)
         self.bus.sync_write("Goal_Position", goal_pos, normalize=True)
 
         return {f"{motor}.pos": val for motor, val in goal_pos.items()}
-
-    def get_action(self) -> Dict[str, float]:
-        """
-        Get current motor positions as action dictionary.
-
-        Returns:
-            Dictionary mapping motor names (with .pos suffix) to normalized position values
-        """
-        return self.get_observation()
 
     def get_observation(self) -> Dict[str, float]:
         """
@@ -252,10 +256,13 @@ class SO101Follower(SO101Robot):
             self._current_positions = obs_dict
             return obs_dict
         except SerialException as e:
-            logger.warning(f"Serial communication error reading follower positions: {e}. Using last known positions.")
+            logger.warning(
+                f"Serial communication error reading follower positions: {e}. Using last known positions."
+            )
             # Return last known positions if available, otherwise empty dict
             # Don't mark as disconnected - this could be a transient error
             return self._current_positions if self._current_positions else {}
+
 
     @property
     def torque_enabled(self) -> bool:

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from cyberwave import Cyberwave, Twin
+from cyberwave.constants import SOURCE_TYPE_EDGE_FOLLOWER, SOURCE_TYPE_EDGE_LEADER
 from cyberwave.sensor import CameraStreamManager, Resolution
 from cyberwave.utils import TimeReference
 from dotenv import load_dotenv
@@ -71,31 +72,46 @@ def teleop_loop(
 
             timestamp, timestamp_monotonic = time_reference.update()
 
-            leader_action = leader.get_action() if leader is not None else {}
-
-            follower_action = None
-            if follower is not None:
-                follower_action = follower.get_observation()
-            else:
-                follower_action = leader_action
+            leader_obs = leader.get_observation() if leader is not None else {}
+            follower_obs = follower.get_observation() if follower is not None else leader_obs
 
             if follower is not None and leader is not None:
                 try:
-                    follower.send_action(leader_action)
+                    follower.send_action(leader_obs)
                 except Exception:
                     if status_tracker:
                         status_tracker.increment_errors()
 
-            update_count, skip_count = process_cyberwave_updates(
-                action=follower_action,
-                last_observation=last_observation,
-                action_queue=action_queue,
-                position_threshold=position_threshold,
-                timestamp=timestamp,
-                status_tracker=status_tracker,
-                last_send_times=last_send_times,
-                heartbeat_interval=heartbeat_interval,
-            )
+            # Send both leader and follower observations to Cyberwave (when both exist)
+            update_count, skip_count = 0, 0
+            if leader_obs:
+                uc, sc = process_cyberwave_updates(
+                    action=leader_obs,
+                    last_observation=last_observation,
+                    action_queue=action_queue,
+                    position_threshold=position_threshold,
+                    timestamp=timestamp,
+                    status_tracker=status_tracker,
+                    last_send_times=last_send_times,
+                    heartbeat_interval=heartbeat_interval,
+                    source_type=SOURCE_TYPE_EDGE_LEADER,
+                )
+                update_count += uc
+                skip_count += sc
+            if follower_obs and follower is not None and follower_obs is not leader_obs:
+                uc, sc = process_cyberwave_updates(
+                    action=follower_obs,
+                    last_observation=last_observation,
+                    action_queue=action_queue,
+                    position_threshold=position_threshold,
+                    timestamp=timestamp,
+                    status_tracker=status_tracker,
+                    last_send_times=last_send_times,
+                    heartbeat_interval=heartbeat_interval,
+                    source_type=SOURCE_TYPE_EDGE_FOLLOWER,
+                )
+                update_count += uc
+                skip_count += sc
             total_update_count += update_count
             total_skip_count += skip_count
 

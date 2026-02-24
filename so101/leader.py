@@ -4,13 +4,13 @@ import logging
 from pathlib import Path
 from typing import Dict, Optional
 
-from so101.robot import SO101Robot
 from serial.serialutil import SerialException
 
 from motors import (
     FeetechMotorsBus,
     MotorCalibration,
 )
+from so101.robot import SO101Robot
 from utils.config import LeaderConfig
 from utils.errors import DeviceNotConnectedError
 from utils.utils import load_calibration
@@ -98,34 +98,11 @@ class SO101Leader(SO101Robot):
         # Torque remains disabled unless explicitly enabled
         # Read initial positions
         try:
-            self._last_known_positions = self.get_action()
+            self._last_known_positions = self.get_observation()
         except Exception:
             # If we can't read initial positions, start with empty dict
             self._last_known_positions = {}
         logger.info("Leader connected successfully (torque disabled - passive mode)")
-
-    def get_action(self) -> Dict[str, float]:
-        """
-        Get current motor positions as action dictionary.
-
-        Returns:
-            Dictionary mapping motor names (with .pos suffix) to normalized position values
-        """
-        if not self.connected:
-            raise DeviceNotConnectedError("Leader is not connected")
-
-        try:
-            # Read normalized positions (bus handles normalization automatically)
-            action = self.bus.sync_read("Present_Position", normalize=True)
-            action = {f"{motor}.pos": val for motor, val in action.items()}
-            # Update last known positions on successful read
-            self._last_known_positions = action
-            return action
-        except SerialException as e:
-            logger.warning(f"Serial communication error reading leader positions: {e}. Using last known positions.")
-            # Return last known positions if available, otherwise empty dict
-            # Don't mark as disconnected - this could be a transient error
-            return self._last_known_positions if self._last_known_positions else {}
 
     def get_observation(self) -> Dict[str, float]:
         """
@@ -134,7 +111,20 @@ class SO101Leader(SO101Robot):
         Returns:
             Dictionary mapping motor names (with .pos suffix) to normalized position values
         """
-        return self.get_action()
+        if not self.connected:
+            raise DeviceNotConnectedError("Leader is not connected")
+
+        try:
+            obs = self.bus.sync_read("Present_Position", normalize=True)
+            obs = {f"{motor}.pos": val for motor, val in obs.items()}
+            self._last_known_positions = obs
+            return obs
+        except SerialException as e:
+            logger.warning(
+                f"Serial communication error reading leader positions: {e}. "
+                "Using last known positions."
+            )
+            return self._last_known_positions if self._last_known_positions else {}
 
     @property
     def torque_enabled(self) -> bool:

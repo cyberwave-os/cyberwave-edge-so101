@@ -69,10 +69,6 @@ class SO101Robot(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def get_action(self) -> Dict[str, float]:
-        pass
-
-    @abc.abstractmethod
     def get_observation(self) -> Dict[str, float]:
         pass
 

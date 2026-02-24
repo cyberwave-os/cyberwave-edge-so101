@@ -73,11 +73,7 @@ def cyberwave_update_worker(
                         joint_name, MotorNormMode.RANGE_M100_100
                     )
 
-                    calib = (
-                        follower_calibration.get(joint_name)
-                        if follower_calibration
-                        else None
-                    )
+                    calib = follower_calibration.get(joint_name) if follower_calibration else None
                     if calib is not None:
                         r_min = calib.range_min
                         r_max = calib.range_max
@@ -88,12 +84,8 @@ def cyberwave_update_worker(
                             position = raw_offset * (2.0 * math.pi / 4095.0)
                         elif norm_mode == MotorNormMode.RANGE_0_100:
                             delta_r = r_max - r_min
-                            raw_value = r_min + (
-                                normalized_position / 100.0
-                            ) * delta_r
-                            position = (raw_value - r_min) * (
-                                2.0 * math.pi / 4095.0
-                            )
+                            raw_value = r_min + (normalized_position / 100.0) * delta_r
+                            position = (raw_value - r_min) * (2.0 * math.pi / 4095.0)
                         else:
                             position = normalized_position * math.pi / 180.0
                     else:
@@ -107,7 +99,14 @@ def cyberwave_update_worker(
                         else:
                             position = normalized_position * math.pi / 180.0
 
-                    batch_updates[joint_index] = (position, 0.0, 0.0, timestamp)
+                    source_type = action_data.get("source_type")
+                    batch_updates[joint_index] = (
+                        position,
+                        0.0,
+                        0.0,
+                        timestamp,
+                        source_type,
+                    )
                     action_queue.task_done()
 
                 except Exception:
@@ -118,7 +117,8 @@ def cyberwave_update_worker(
             if batch_updates:
                 try:
                     joint_states: Dict[str, float] = {}
-                    for joint_index, (position, _, _, timestamp) in batch_updates.items():
+                    for joint_index, batch_val in batch_updates.items():
+                        position, _, _, timestamp, source_type = batch_val
                         schema_joint = (
                             motor_id_to_schema_joint.get(joint_index, str(joint_index))
                             if motor_id_to_schema_joint
@@ -129,6 +129,7 @@ def cyberwave_update_worker(
                             position=position,
                             degrees=False,
                             timestamp=timestamp,
+                            source_type=source_type,
                         )
                         joint_states[str(joint_index)] = position
 
@@ -153,24 +154,24 @@ def process_cyberwave_updates(
     status_tracker: Optional[StatusTracker] = None,
     last_send_times: Optional[Dict[str, float]] = None,
     heartbeat_interval: float = 1.0,
+    source_type: Optional[str] = None,
 ) -> tuple[int, int]:
     """
-    Process follower observation and queue Cyberwave updates for changed joints.
+    Process observation and queue Cyberwave updates for changed joints.
 
-    Follower observation contains normalized positions. If a joint hasn't been sent
+    Observation contains normalized positions. If a joint hasn't been sent
     for heartbeat_interval seconds, it will be sent anyway as a heartbeat.
 
     Args:
-        action: Follower observation dictionary with normalized positions (keys have .pos suffix)
+        action: Observation dictionary with normalized positions (keys have .pos suffix)
         last_observation: Dictionary tracking last sent observation state (normalized positions)
         action_queue: Queue for Cyberwave updates
         position_threshold: Minimum change in normalized position to trigger update
-        velocity_threshold: Unused (kept for compatibility)
-        effort_threshold: Unused (kept for compatibility)
         timestamp: Timestamp to associate with this update (generated in teleop loop)
         status_tracker: Optional status tracker for statistics
         last_send_times: Dictionary tracking last send time per joint (for heartbeat)
         heartbeat_interval: Interval in seconds to send heartbeat if no changes (default 1.0)
+        source_type: SOURCE_TYPE_EDGE_LEADER or SOURCE_TYPE_EDGE_FOLLOWER for MQTT
     Returns:
         Tuple of (update_count, skip_count)
     """
@@ -207,6 +208,7 @@ def process_cyberwave_updates(
                 "velocity": 0.0,
                 "load": 0.0,
                 "timestamp": timestamp,
+                "source_type": source_type,
             }
             try:
                 action_queue.put_nowait((joint_name, action_data))
