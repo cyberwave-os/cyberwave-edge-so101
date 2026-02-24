@@ -19,8 +19,6 @@ from cyberwave import Cyberwave, Twin
 # Import camera configuration and stream manager from cyberwave SDK
 from cyberwave.sensor import (
     CameraStreamManager,
-    CV2CameraStreamer,
-    RealSenseStreamer,
     Resolution,
 )
 from cyberwave.utils import TimeReference
@@ -29,7 +27,6 @@ from dotenv import load_dotenv
 # RealSense is optional - only import if available
 try:
     from cyberwave.sensor import (
-        RealSenseConfig,
         RealSenseDiscovery,
     )
 
@@ -42,7 +39,6 @@ except ImportError:
 from motors import MotorNormMode
 from scripts.cw_setup import load_setup_config
 from scripts.cw_write_position import validate_position
-from so101.camera import CameraConfig
 from so101.follower import SO101Follower
 from utils.config import get_setup_config_path
 from utils.trackers import StatusTracker, run_status_logging_thread

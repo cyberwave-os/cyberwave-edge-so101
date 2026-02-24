@@ -449,9 +449,9 @@ def detect_voltage_rating(port: str, motor_id: int = 1, baudrate: int = 1000000)
             )
             if result == 0:
                 voltage = present_voltage / 10.0
-                # If voltage is between 4-7V, likely 5V system
+                # If voltage is between 4-78, likely 5V system
                 # If voltage is between 10-14V, likely 12V system
-                if 4.0 <= voltage <= 7.0:
+                if 4.0 <= voltage <= 8.0:
                     return 5
                 elif 10.0 <= voltage <= 14.0:
                     return 12

@@ -27,6 +27,9 @@ SO101_MOTORS = {
     "gripper": Motor(id=6, model="STS3215", norm_mode=MotorNormMode.RANGE_0_100),
 }
 
+SO101_MOTOR_NAMES = list(SO101_MOTORS.keys())
+SO101_MOTOR_IDS = list(SO101_MOTORS.values().id)
+SO101_MOTOR_TO_JOINT_NAME = {key: value.id for key, value in SO101_MOTORS.items()}
 
 class SO101Robot(abc.ABC):
     """Abstract base class for SO101 leader and follower robots."""

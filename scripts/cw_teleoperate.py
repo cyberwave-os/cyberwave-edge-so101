@@ -19,8 +19,6 @@ from cyberwave import Cyberwave, Twin
 # Import camera configuration and stream manager from cyberwave SDK
 from cyberwave.sensor import (
     CameraStreamManager,
-    CV2CameraStreamer,
-    RealSenseStreamer,
     Resolution,
 )
 from cyberwave.utils import TimeReference
@@ -29,7 +27,6 @@ from dotenv import load_dotenv
 # RealSense is optional - only import if available
 try:
     from cyberwave.sensor import (
-        RealSenseConfig,
         RealSenseDiscovery,
     )
 
@@ -44,243 +41,11 @@ from scripts.cw_setup import load_setup_config
 from so101.follower import SO101Follower
 from so101.leader import SO101Leader
 from utils.config import get_setup_config_path
+from utils.cw_update_worker import cyberwave_update_worker, process_cyberwave_updates
 from utils.trackers import StatusTracker, run_status_logging_thread
 from utils.utils import load_calibration
 
 logger = logging.getLogger(__name__)
-
-
-def cyberwave_update_worker(
-    action_queue: queue.Queue,
-    joint_name_to_index: Dict[str, int],
-    joint_name_to_norm_mode: Dict[str, MotorNormMode],
-    stop_event: threading.Event,
-    twin: Optional[Twin] = None,
-    time_reference: TimeReference = None,
-    status_tracker: Optional[StatusTracker] = None,
-    follower_calibration: Optional[Dict[str, Any]] = None,
-    motor_id_to_schema_joint: Optional[Dict[int, str]] = None,
-) -> None:
-    """
-    Worker thread that processes actions from the queue and updates Cyberwave twin.
-
-    Batches multiple joint updates together and skips updates where position is 0.0.
-    Velocity and effort are hardcoded to 0.0 to avoid issues.
-    Always converts positions to radians.
-    Uses schema joint names (e.g. "_1", "_2") for MQTT updates, matching the twin's
-    universal schema.
-
-    Args:
-        action_queue: Queue containing (joint_name, action_data) tuples where action_data
-                     is a dict with 'position', 'velocity', 'load', and 'timestamp' keys
-        joint_name_to_index: Dictionary mapping joint names to joint indexes (1-6)
-        joint_name_to_norm_mode: Dictionary mapping joint names to normalization modes
-        stop_event: Event to signal thread to stop
-        twin: Optional Twin instance for updating joint states
-        time_reference: TimeReference instance
-        status_tracker: Optional status tracker for statistics
-        follower_calibration: Calibration data for converting normalized positions
-        motor_id_to_schema_joint: Mapping from motor ID to schema joint name (e.g. 1 -> "_1")
-    Returns:
-        None
-    """
-    processed_count = 0
-    error_count = 0
-    batch_timeout = 0.01  # 10ms - collect updates for batching
-
-    while not stop_event.is_set():
-        try:
-            # Collect multiple joint updates for batching
-            batch_updates = {}  # joint_index -> (position, velocity, effort, timestamp)
-            batch_start_time = time.time()
-
-            # Collect updates until timeout or queue is empty
-            while True:
-                try:
-                    # Try to get an update with short timeout
-                    remaining_time = batch_timeout - (time.time() - batch_start_time)
-                    if remaining_time <= 0:
-                        break
-
-                    joint_name, action_data = action_queue.get(timeout=min(remaining_time, 0.001))
-                except queue.Empty:
-                    # No more items available, process what we have
-                    break
-
-                try:
-                    # Get joint index from joint name
-                    joint_index = joint_name_to_index.get(joint_name)
-                    if joint_index is None:
-                        action_queue.task_done()
-                        continue
-
-                    # Extract normalized position from action_data (velocity and effort are hardcoded to 0.0)
-                    normalized_position = action_data.get("position", 0.0)
-                    timestamp = action_data.get("timestamp")  # Extract timestamp from action_data
-
-                    # Convert normalized position to radians using follower calibration
-                    calib = follower_calibration[joint_name]
-                    r_min = calib.range_min
-                    r_max = calib.range_max
-                    delta_r = (r_max - r_min) / 2.0
-
-                    # Get normalization mode for this joint
-                    norm_mode = joint_name_to_norm_mode.get(
-                        joint_name, MotorNormMode.RANGE_M100_100
-                    )
-
-                    # Convert normalized -> radians using calibration ranges
-                    # Normalized value represents percentage of calibrated range
-                    match norm_mode:
-                        case MotorNormMode.RANGE_M100_100:
-                            raw_offset = (normalized_position / 100.0) * delta_r
-                            position = raw_offset * (2.0 * math.pi / 4095.0)
-                        case MotorNormMode.RANGE_0_100:
-                            delta_r = r_max - r_min
-                            raw_value = r_min + (normalized_position / 100.0) * delta_r
-                            position = (raw_value - r_min) * (2.0 * math.pi / 4095.0)
-                        case _:
-                            position = normalized_position * math.pi / 180.0
-
-                    # Hardcode velocity and effort to 0.0 to avoid issues
-                    velocity = 0.0
-                    effort = 0.0
-
-                    # Store in batch (overwrite if same joint appears multiple times)
-                    batch_updates[joint_index] = (position, velocity, effort, timestamp)
-                    action_queue.task_done()
-
-                except Exception:
-                    error_count += 1
-                    if status_tracker:
-                        status_tracker.increment_errors()
-                    action_queue.task_done()
-
-            # Send batched updates
-            if batch_updates:
-                try:
-                    # Send all joints in the batch using schema joint names (e.g. "_1", "_2")
-                    joint_states = {}
-                    for joint_index, (position, _, _, timestamp) in batch_updates.items():
-                        schema_joint = (
-                            motor_id_to_schema_joint.get(joint_index, str(joint_index))
-                            if motor_id_to_schema_joint
-                            else str(joint_index)
-                        )
-                        twin.joints.set(
-                            joint_name=schema_joint,
-                            position=position,
-                            degrees=False,
-                            timestamp=timestamp,
-                        )
-                        joint_states[str(joint_index)] = position
-
-                    processed_count += len(batch_updates)
-                    if status_tracker:
-                        status_tracker.increment_produced()
-                        status_tracker.update_joint_states(joint_states)
-                except Exception:
-                    error_count += len(batch_updates)
-                    if status_tracker:
-                        status_tracker.increment_errors()
-
-        except Exception:
-            error_count += 1
-            if status_tracker:
-                status_tracker.increment_errors()
-
-
-def _process_cyberwave_updates(
-    action: Dict[str, float],
-    last_observation: Dict[str, float],
-    action_queue: queue.Queue,
-    position_threshold: float,
-    velocity_threshold: float,
-    effort_threshold: float,
-    timestamp: float,
-    status_tracker: Optional[StatusTracker] = None,
-    last_send_times: Optional[Dict[str, float]] = None,
-    heartbeat_interval: float = 1.0,
-) -> tuple[int, int]:
-    """
-    Process follower observation and queue Cyberwave updates for changed joints.
-
-    Follower observation contains normalized positions. If a joint hasn't been sent
-    for heartbeat_interval seconds, it will be sent anyway as a heartbeat.
-
-    Args:
-        action: Follower observation dictionary with normalized positions (keys have .pos suffix)
-        last_observation: Dictionary tracking last sent observation state (normalized positions)
-        action_queue: Queue for Cyberwave updates
-        position_threshold: Minimum change in normalized position to trigger update
-        velocity_threshold: Unused (kept for compatibility)
-        effort_threshold: Unused (kept for compatibility)
-        timestamp: Timestamp to associate with this update (generated in teleop loop)
-        status_tracker: Optional status tracker for statistics
-        last_send_times: Dictionary tracking last send time per joint (for heartbeat)
-        heartbeat_interval: Interval in seconds to send heartbeat if no changes (default 1.0)
-    Returns:
-        Tuple of (update_count, skip_count)
-    """
-    update_count = 0
-    skip_count = 0
-    current_time = time.time()
-
-    for joint_key, normalized_pos in action.items():
-        # Extract joint name from key (remove .pos suffix if present)
-        joint_name = joint_key.removesuffix(".pos") if joint_key.endswith(".pos") else joint_key
-
-        if joint_name not in last_observation:
-            # New joint, initialize and send
-            last_observation[joint_name] = float("inf")
-
-        if last_send_times is not None and joint_name not in last_send_times:
-            last_send_times[joint_name] = 0.0
-
-        last_obs = last_observation[joint_name]
-
-        # Check if position has changed beyond threshold (using normalized values)
-        pos_changed = abs(normalized_pos - last_obs) >= position_threshold
-
-        # Force first update (when last_obs is inf)
-        is_first_update = last_obs == float("inf")
-
-        # Check if heartbeat is needed (no update sent for heartbeat_interval)
-        needs_heartbeat = False
-        if last_send_times is not None:
-            time_since_last_send = current_time - last_send_times.get(joint_name, 0.0)
-            needs_heartbeat = time_since_last_send >= heartbeat_interval
-
-        if is_first_update or pos_changed or needs_heartbeat:
-            # Update last observation (store normalized position)
-            last_observation[joint_name] = normalized_pos
-
-            # Update last send time
-            if last_send_times is not None:
-                last_send_times[joint_name] = current_time
-
-            # Queue action for Cyberwave update (non-blocking)
-            # Format: (joint_name, {"position": normalized_pos, "velocity": 0.0, "load": 0.0, "timestamp": timestamp})
-            # Worker thread will handle conversion to degrees/radians
-            action_data = {
-                "position": normalized_pos,
-                "velocity": 0.0,  # Hardcoded to 0.0
-                "load": 0.0,  # Hardcoded to 0.0
-                "timestamp": timestamp,  # Add timestamp from teleop loop
-            }
-            try:
-                action_queue.put_nowait((joint_name, action_data))
-                update_count += 1
-            except queue.Full:
-                if status_tracker:
-                    status_tracker.increment_errors()
-                continue
-        else:
-            skip_count += 1
-            if status_tracker:
-                status_tracker.increment_filtered()
-
-    return update_count, skip_count
 
 
 def _keyboard_input_thread(stop_event: threading.Event) -> None:
@@ -388,7 +153,7 @@ def _teleop_loop(
                         status_tracker.increment_errors()
 
             # Process Cyberwave updates every loop (100Hz)
-            update_count, skip_count = _process_cyberwave_updates(
+            update_count, skip_count = process_cyberwave_updates(
                 action=follower_action,
                 last_observation=last_observation,
                 action_queue=action_queue,
@@ -423,20 +188,11 @@ def teleoperate(
     leader: Optional[SO101Leader],
     cyberwave_client: Optional[Cyberwave] = None,
     follower: Optional[SO101Follower] = None,
-    camera_fps: int = 30,
+    robot: Optional[Twin] = None,
+    cameras: Optional[List[Dict[str, Any]]] = None,
     position_threshold: float = 0.1,
     velocity_threshold: float = 100.0,
     effort_threshold: float = 0.1,
-    robot: Optional[Twin] = None,
-    camera: Optional[Twin] = None,
-    cameras: Optional[List[Dict[str, Any]]] = None,
-    camera_type: str = "cv2",
-    camera_id: Union[int, str] = 0,
-    camera_resolution: Resolution = Resolution.VGA,
-    enable_depth: bool = False,
-    depth_fps: int = 30,
-    depth_resolution: Optional[Resolution] = None,
-    depth_publish_interval: int = 30,
 ) -> None:
     """
     Run teleoperation loop: read from leader, send to follower, and send follower data to Cyberwave.
@@ -448,56 +204,35 @@ def teleoperate(
 
     The control loop always runs at 100Hz for responsive robot control and MQTT updates.
 
-    Supports both CV2 (USB/webcam/IP) cameras and Intel RealSense cameras.
+    Camera config is loaded from setup.json via so101-setup. Pass cameras list built from
+    setup (each dict: twin, camera_id, camera_type, camera_resolution, fps, etc.).
 
     Args:
         leader: SO101Leader instance (optional if camera_only=True)
         cyberwave_client: Cyberwave client instance (required)
         follower: SO101Follower instance (required when robot twin is provided)
-        camera_fps: Frames per second for camera streaming
+        robot: Robot twin instance
+        cameras: List of camera configs from setup.json. Each dict has twin + overrides
+            (camera_id, camera_type, camera_resolution, fps, enable_depth, etc.).
+            CameraStreamManager uses these directly.
         position_threshold: Minimum change in position to trigger an update (in normalized units)
         velocity_threshold: Minimum change in velocity to trigger an update
         effort_threshold: Minimum change in effort to trigger an update
-        robot: Robot twin instance
-        camera: Camera twin instance (single camera, backward compat). Ignored if cameras is set.
-        cameras: List of camera configs for multi-stream. Each dict: twin, camera_id, camera_name
-            (optional, from sensor id), camera_type, camera_resolution, enable_depth, etc.
-            Each entry gets its own stream manager to avoid cascading failures.
-        camera_type: Camera type - "cv2" for USB/webcam/IP, "realsense" for Intel RealSense
-        camera_id: Camera device ID (int) or stream URL (str) for CV2 cameras (default: 0)
-        camera_resolution: Video resolution (default: VGA 640x480)
-        enable_depth: Enable depth streaming for RealSense (default: False)
-        depth_fps: Depth stream FPS for RealSense (default: 30)
-        depth_resolution: Depth resolution for RealSense (default: same as color)
-        depth_publish_interval: Publish depth every N frames for RealSense (default: 30)
     """
     time_reference = TimeReference()
 
     # Disable all logging to avoid interfering with status display
     logging.disable(logging.CRITICAL)
 
-    # Build camera twins for CameraStreamManager (twin + optional overrides)
+    # Build camera twins for CameraStreamManager from cameras (loaded from setup.json)
     camera_twins: List[Any] = []
-    if cameras is not None:
-        # cameras: list of dicts with "twin" and overrides -> (twin, overrides)
+    camera_fps = 30
+    if cameras:
         for cfg in cameras:
             twin = cfg["twin"]
             overrides = {k: v for k, v in cfg.items() if k != "twin"}
             camera_twins.append((twin, overrides) if overrides else twin)
-    elif camera is not None:
-        actual_camera_id = camera_id
-        if follower is not None and follower.config.cameras and len(follower.config.cameras) > 0:
-            actual_camera_id = follower.config.cameras[0]
-        overrides = {
-            "camera_id": actual_camera_id,
-            "camera_type": camera_type,
-            "camera_resolution": camera_resolution,
-            "enable_depth": enable_depth,
-            "depth_fps": depth_fps,
-            "depth_resolution": depth_resolution,
-            "depth_publish_interval": depth_publish_interval,
-        }
-        camera_twins.append((camera, overrides))
+        camera_fps = cameras[0].get("fps", 30)
 
     # Create status tracker
     status_tracker = StatusTracker()
@@ -1031,7 +766,6 @@ def main():
     # Initialize Cyberwave client
     cyberwave_client = Cyberwave()
 
-    camera_twin = None
     cameras_list: List[Dict[str, Any]] = []
     setup_config: Dict[str, Any] = {}
 
@@ -1057,16 +791,6 @@ def main():
                 "Run so101-setup with --wrist-camera or --additional-camera."
             )
             sys.exit(1)
-
-    # Default camera values (used when cameras_list is empty - no camera streaming)
-    camera_type = "cv2"
-    camera_fps = setup_config.get("camera_fps", 30)
-    enable_depth = False
-    depth_fps = 30
-    depth_publish_interval = 30
-    camera_id: Union[int, str] = 0
-    camera_resolution = Resolution.VGA
-    depth_resolution = None
 
     # Use setup for cameras (always from setup)
     if setup_config:
@@ -1124,10 +848,6 @@ def main():
                 "depth_publish_interval": add.get("depth_publish_interval", 30),
             })
 
-        if cameras_list:
-            camera_twin = cameras_list[0]["twin"]
-            camera_fps = cameras_list[0].get("fps", 30)
-
     # Resolve twin UUID and ports: CLI/env > setup.json (so teleoperate works with no args when setup exists)
     effective_twin_uuid = args.twin_uuid or setup_config.get("twin_uuid") or setup_config.get(
         "wrist_camera_twin_uuid"
@@ -1152,9 +872,6 @@ def main():
     robot = cyberwave_client.twin(
         asset_key="the-robot-studio/so101", twin_id=effective_twin_uuid, name="robot"
     )
-    # Pass cameras list when we have configs (single or multi), else single camera for backward compat
-    camera = camera_twin if not cameras_list else None
-    cameras = cameras_list if cameras_list else None
     mqtt_client = cyberwave_client.mqtt
 
     # Initialize leader (optional if camera-only mode)
@@ -1200,17 +917,8 @@ def main():
             leader=leader,
             cyberwave_client=cyberwave_client,
             follower=follower,
-            camera_fps=camera_fps,
             robot=robot,
-            camera=camera,
-            cameras=cameras,
-            camera_type=camera_type,
-            camera_id=camera_id,
-            camera_resolution=camera_resolution,
-            enable_depth=enable_depth,
-            depth_fps=depth_fps,
-            depth_resolution=depth_resolution,
-            depth_publish_interval=depth_publish_interval,
+            cameras=cameras_list if cameras_list else None,
         )
     finally:
         if leader is not None:
