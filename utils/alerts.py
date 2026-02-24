@@ -6,6 +6,8 @@ import threading
 import time
 from typing import Any, Dict
 
+from cyberwave import Twin
+
 logger = logging.getLogger(__name__)
 
 # Throttle: minimum seconds between creating the same alert type
@@ -78,12 +80,12 @@ def create_session_started_alert(
 
 
 def create_temperature_alert(
-    robot: Any,
+    robot: Twin,
     joint_name: str,
     device: str,
     temperature: float,
     *,
-    warning_threshold: float = 55.0,
+    warning_threshold: float = 15.0,
     critical_threshold: float = 65.0,
 ) -> bool:
     """
