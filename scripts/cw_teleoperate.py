@@ -27,8 +27,10 @@ from scripts.cw_setup import load_setup_config
 from so101.follower import SO101Follower
 from so101.leader import SO101Leader
 from utils.config import get_setup_config_path
-from utils.cw_alerts import create_calibration_needed_alert
-from utils.cw_remoteoperate_helpers import upload_calibration_to_twin
+from utils.cw_remoteoperate_helpers import (
+    check_calibration_required,
+    upload_calibration_to_twin,
+)
 from utils.cw_teleoperate_helpers import (
     get_teleoperate_parser,
     publish_initial_follower_observation,
@@ -131,10 +133,10 @@ def teleop_loop(
 
 
 def teleoperate(
-    leader: Optional[SO101Leader],
-    cyberwave_client: Optional[Cyberwave] = None,
-    follower: Optional[SO101Follower] = None,
-    robot: Optional[Twin] = None,
+    leader: SO101Leader,
+    cyberwave_client: Cyberwave,
+    follower: SO101Follower,
+    robot: Twin,
     cameras: Optional[List[Dict[str, Any]]] = None,
     position_threshold: float = 0.1,
 ) -> None:
@@ -152,10 +154,10 @@ def teleoperate(
     setup (each dict: twin, camera_id, camera_type, camera_resolution, fps, etc.).
 
     Args:
-        leader: SO101Leader instance (optional if camera_only=True)
+        leader: SO101Leader instance (required)
         cyberwave_client: Cyberwave client instance (required)
-        follower: SO101Follower instance (required when robot twin is provided)
-        robot: Robot twin instance
+        follower: SO101Follower instance (required)
+        robot: Robot twin instance (required)
         cameras: List of camera configs from setup.json. Each dict has twin + overrides
             (camera_id, camera_type, camera_resolution, fps, enable_depth, etc.).
             CameraStreamManager uses these directly.
@@ -182,8 +184,8 @@ def teleoperate(
     status_tracker.camera_enabled = len(camera_twins) > 0
 
     # Set twin info for status display (use first camera for display)
-    robot_uuid = robot.uuid if robot else ""
-    robot_name = robot.name if robot and hasattr(robot, "name") else "so101-teleop"
+    robot_uuid = robot.uuid
+    robot_name = robot.name if hasattr(robot, "name") else "so101-teleop"
 
     def _first_twin(twins: List[Any]):
         if not twins:
@@ -199,9 +201,6 @@ def teleoperate(
     status_tracker.set_twin_info(robot_uuid, robot_name, camera_uuid_val, camera_display_name)
 
     # Ensure MQTT client is connected
-    if cyberwave_client is None:
-        raise RuntimeError("Cyberwave client is required")
-
     mqtt_client = cyberwave_client.mqtt
     if mqtt_client is not None and not mqtt_client.connected:
         mqtt_client.connect()
@@ -220,100 +219,68 @@ def teleoperate(
     else:
         status_tracker.update_mqtt_status(mqtt_client.connected if mqtt_client else False)
 
-    if leader is not None and not leader.connected:
+    if not leader.connected:
         raise RuntimeError("Leader is not connected")
 
-    # Require follower when robot twin is provided (we send follower data to Cyberwave)
-    if robot is not None and follower is None:
-        raise RuntimeError(
-            "Follower is required when robot twin is provided (follower data is sent to Cyberwave)"
-        )
-
-    if follower is not None and not follower.connected:
+    if not follower.connected:
         raise RuntimeError("Follower is not connected")
 
     # Verify follower has torque enabled (required for movement)
-    if follower is not None and not follower.torque_enabled:
+    if not follower.torque_enabled:
         follower.enable_torque()
 
-    # Get calibration data from leader (leader handles its own calibration loading)
-    if leader is not None:
-        if leader.calibration is None:
-            if robot is not None:
-                create_calibration_needed_alert(
-                    robot,
-                    "leader",
-                    description="Please calibrate the leader using the calibration script.",
-                )
-            raise RuntimeError(
-                "Leader is not calibrated. Please calibrate the leader first using the calibration script."
-            )
-        # Upload leader calibration to twin if robot twin is provided
-        if robot is not None:
-            upload_calibration_to_twin(leader, robot, "leader")
+    # Check calibration for leader (required)
+    check_calibration_required(
+        leader,
+        "leader",
+        twin=robot,
+        require_calibration=True,
+    )
+    # Upload leader calibration to twin
+    upload_calibration_to_twin(leader, robot, "leader")
 
-    # Alert when follower is not calibrated (can still run with fallback conversion)
-    if follower is not None and robot is not None and follower.calibration is None:
-        create_calibration_needed_alert(
-            robot,
-            "follower",
-            description="Please calibrate the follower using the calibration script for accurate positioning.",
-        )
+    # Check calibration for follower (required)
+    check_calibration_required(
+        follower,
+        "follower",
+        twin=robot,
+        require_calibration=True,
+    )
 
     # Upload follower calibration to twin if available
-    if follower is not None and follower.calibration is not None and robot is not None:
+    if follower.calibration is not None:
         upload_calibration_to_twin(follower, robot, "follower")
 
     # Use follower motors for mappings when sending to Cyberwave (follower data is what we send)
-    # Fall back to leader motors if follower not available (for camera-only mode)
-    motors_for_mapping = (
-        follower.motors if follower is not None else (leader.motors if leader is not None else {})
+    motors_for_mapping = follower.motors
+
+    # Resolve calibration: prefer local device, fallback to twin API
+    follower_calibration = resolve_calibration_for_edge(
+        robot,
+        follower.calibration,
+        "follower",
     )
 
-    # Resolve calibration: prefer local device, fallback to twin API (same as remoteoperate)
-    follower_calibration = None
-    if robot is not None:
-        follower_calibration = resolve_calibration_for_edge(
-            robot,
-            follower.calibration if follower is not None else None,
-            "follower",
-        )
+    # Build joint mappings from twin schema and SO101 motors
+    mappings = build_joint_mappings(robot, motors_for_mapping)
+    motor_id_to_schema_joint = mappings["motor_id_to_schema_joint"]
+    joint_index_to_name = mappings["joint_index_to_name"]
+    joint_name_to_norm_mode = mappings["joint_name_to_norm_mode"]
+    joint_name_to_index = {name: mid for mid, name in joint_index_to_name.items()}
 
-    # Build joint mappings from twin schema and SO101 motors (same as remoteoperate)
-    motor_id_to_schema_joint: Dict[int, str] = {}
-    joint_name_to_index: Dict[str, int] = {}
-    joint_name_to_norm_mode: Dict[str, Any] = {}
-    joint_index_to_name: Dict[int, str] = {}
-    if robot is not None and motors_for_mapping:
-        mappings = build_joint_mappings(robot, motors_for_mapping)
-        motor_id_to_schema_joint = mappings["motor_id_to_schema_joint"]
-        joint_index_to_name = mappings["joint_index_to_name"]
-        joint_name_to_norm_mode = mappings["joint_name_to_norm_mode"]
-        joint_name_to_index = {name: mid for mid, name in joint_index_to_name.items()}
-    elif motors_for_mapping:
-        # No robot: build from motors only (e.g. camera-only with leader)
-        joint_index_to_name = {motor.id: name for name, motor in motors_for_mapping.items()}
-        joint_name_to_norm_mode = {
-            name: motor.norm_mode for name, motor in motors_for_mapping.items()
-        }
-        joint_name_to_index = {name: motor.id for name, motor in motors_for_mapping.items()}
+    joint_index_to_name_str = {str(mid): name for mid, name in joint_index_to_name.items()}
+    status_tracker.set_joint_index_to_name(joint_index_to_name_str)
 
-    if motors_for_mapping:
-        joint_index_to_name_str = {str(mid): name for mid, name in joint_index_to_name.items()}
-        status_tracker.set_joint_index_to_name(joint_index_to_name_str)
-
-        # Initialize last observation state (track normalized positions)
-        last_observation: Dict[str, float] = {}
-        for joint_name in motors_for_mapping.keys():
-            last_observation[joint_name] = float("inf")  # Use inf to force first update
-    else:
-        last_observation: Dict[str, float] = {}
+    # Initialize last observation state (track normalized positions)
+    last_observation: Dict[str, float] = {}
+    for joint_name in motors_for_mapping.keys():
+        last_observation[joint_name] = float("inf")  # Use inf to force first update
 
     # Create queue and worker thread for Cyberwave updates
-    num_joints = len(motors_for_mapping) if motors_for_mapping else 0
+    num_joints = len(motors_for_mapping)
     sampling_rate = 100  # Hz
     seconds = 60  # seconds
-    queue_size = num_joints * sampling_rate * seconds if num_joints > 0 else 1000
+    queue_size = num_joints * sampling_rate * seconds
     action_queue = queue.Queue(maxsize=queue_size)  # Limit queue size to prevent memory issues
     stop_event = threading.Event()
 
@@ -537,20 +504,7 @@ def main():
             print(f"Loaded setup from: {setup_path}")
 
     # All camera/teleop config comes from setup.json (so101-setup)
-    camera_only = setup_config.get("camera_only", False)
     max_relative_target = setup_config.get("max_relative_target")
-
-    # Validate: camera-only requires setup with cameras
-    if camera_only:
-        has_setup_cameras = (
-            setup_config.get("wrist_camera") or len(setup_config.get("additional_cameras", [])) > 0
-        )
-        if not has_setup_cameras:
-            print(
-                "Error: camera_only in setup requires wrist_camera or additional_cameras. "
-                "Run so101-setup with --wrist-camera or --additional-camera."
-            )
-            sys.exit(1)
 
     # Use setup for cameras (always from setup)
     if setup_config:
@@ -629,11 +583,18 @@ def main():
         )
         sys.exit(1)
 
-    # Follower required for teleop (sends data to Cyberwave) or camera-only (streaming)
-    if not effective_follower_port and (not camera_only or cameras_list):
+    # Follower and leader are both required for teleoperation
+    if not effective_follower_port:
         print(
             "Error: Follower port required. Calibrate follower first (so101-calibrate) to save port, "
             "or pass --follower-port / set CYBERWAVE_METADATA_FOLLOWER_PORT"
+        )
+        sys.exit(1)
+
+    if not effective_leader_port:
+        print(
+            "Error: Leader port required. Calibrate leader first (so101-calibrate) to save port, "
+            "or pass --leader-port / set CYBERWAVE_METADATA_LEADER_PORT"
         )
         sys.exit(1)
 
@@ -642,43 +603,29 @@ def main():
     )
     mqtt_client = cyberwave_client.mqtt
 
-    # Initialize leader (optional if camera-only mode)
-    leader = None
-    if not camera_only:
-        from utils.config import LeaderConfig
-        from utils.utils import find_port
+    # Initialize leader (required)
+    from utils.config import LeaderConfig
 
-        leader_port = effective_leader_port
-        if not leader_port:
-            leader_port = find_port(device_name="SO101 Leader")
+    leader_config = LeaderConfig(port=effective_leader_port)
+    leader = SO101Leader(config=leader_config)
+    leader.connect()
 
-        leader_config = LeaderConfig(port=leader_port)
-        leader = SO101Leader(config=leader_config)
-        leader.connect()
+    # Initialize follower (required)
+    from utils.config import FollowerConfig
 
-    # Initialize follower (required for camera-only mode, optional otherwise)
-    follower = None
-    if effective_follower_port or camera_only:
-        if not effective_follower_port:
-            raise RuntimeError(
-                "--follower-port is required when using --camera-only. "
-                "Calibrate the follower first (so101-calibrate) or pass --follower-port."
-            )
-        from utils.config import FollowerConfig
+    # Only configure cameras on the follower if camera(s) are being used
+    follower_cameras = None
+    if cameras_list:
+        # Support both int (device index) and str (URL) for camera_id
+        follower_cameras = [cfg["camera_id"] for cfg in cameras_list]
 
-        # Only configure cameras on the follower if camera(s) are being used
-        follower_cameras = None
-        if cameras_list:
-            # Support both int (device index) and str (URL) for camera_id
-            follower_cameras = [cfg["camera_id"] for cfg in cameras_list]
-
-        follower_config = FollowerConfig(
-            port=effective_follower_port,
-            max_relative_target=max_relative_target,
-            cameras=follower_cameras,
-        )
-        follower = SO101Follower(config=follower_config)
-        follower.connect()
+    follower_config = FollowerConfig(
+        port=effective_follower_port,
+        max_relative_target=max_relative_target,
+        cameras=follower_cameras,
+    )
+    follower = SO101Follower(config=follower_config)
+    follower.connect()
 
     try:
         teleoperate(
@@ -689,10 +636,8 @@ def main():
             cameras=cameras_list if cameras_list else None,
         )
     finally:
-        if leader is not None:
-            leader.disconnect()
-        if follower is not None:
-            follower.disconnect()
+        leader.disconnect()
+        follower.disconnect()
         # Disconnect MQTT client
         if mqtt_client is not None and mqtt_client.connected:
             mqtt_client.disconnect()

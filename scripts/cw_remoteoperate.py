@@ -26,8 +26,8 @@ except ImportError:
 from scripts.cw_setup import load_setup_config
 from so101.follower import SO101Follower
 from utils.config import get_setup_config_path
-from utils.cw_alerts import create_calibration_needed_alert
 from utils.cw_remoteoperate_helpers import (
+    check_calibration_required,
     create_joint_state_callback,
     get_remoteoperate_parser,
     joint_position_heartbeat_thread,
@@ -115,13 +115,13 @@ def remoteoperate(
     if not follower.torque_enabled:
         follower.enable_torque()
 
-    # Alert when follower is not calibrated (can still run with fallback conversion)
-    if follower.calibration is None:
-        create_calibration_needed_alert(
-            robot,
-            "follower",
-            description="Please calibrate the follower using the calibration script for accurate positioning.",
-        )
+    # Check calibration - required for accurate positioning
+    check_calibration_required(
+        follower,
+        "follower",
+        twin=robot,
+        require_calibration=True,
+    )
 
     # Upload follower calibration to twin if available
     if follower.calibration is not None:

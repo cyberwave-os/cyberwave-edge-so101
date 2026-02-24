@@ -16,6 +16,7 @@ from scripts.cw_write_position import validate_position
 from so101.follower import SO101Follower
 from so101.leader import SO101Leader
 from utils.trackers import StatusTracker
+from utils.cw_alerts import create_calibration_needed_alert
 from utils.utils import (
     ensure_safe_goal_position,
     load_calibration,
@@ -404,7 +405,11 @@ def upload_calibration_to_twin(
     twin: Twin,
     robot_type: str = "follower",
 ) -> None:
-    """Upload calibration data from leader or follower device to Cyberwave twin."""
+    """Upload calibration data from leader or follower device to Cyberwave twin.
+
+    Maps device motor IDs to the twin's schema joint names (from get_controllable_joint_names).
+    The backend expects joint names matching the asset kinematics, not motor IDs.
+    """
     try:
         calibration_path = device.config.calibration_dir / f"{device.config.id}.json"
 
@@ -414,6 +419,13 @@ def upload_calibration_to_twin(
 
         calib_data = load_calibration(calibration_path)
 
+        # Get twin schema joint names (e.g. "_1", "_2", etc. for so101)
+        try:
+            schema_joint_names = twin.get_controllable_joint_names()
+        except Exception as e:
+            logger.warning(f"Could not get twin joint names: {e}, using motor IDs")
+            schema_joint_names = None
+
         joint_calibration = {}
         for joint_name, calib in calib_data.items():
             if joint_name not in device.motors:
@@ -421,9 +433,20 @@ def upload_calibration_to_twin(
                 continue
 
             motor_id = device.motors[joint_name].id
-            motor_id_str = str(motor_id)
 
-            joint_calibration[motor_id_str] = {
+            # Map motor ID to schema joint name (motor ID 1 -> index 0 in schema)
+            if schema_joint_names is not None:
+                idx = motor_id - 1
+                if idx < len(schema_joint_names):
+                    schema_joint = schema_joint_names[idx]
+                else:
+                    # Fallback to motor ID if index out of range
+                    schema_joint = f"_{motor_id}"
+            else:
+                # Fallback if we couldn't get schema joint names
+                schema_joint = f"_{motor_id}"
+
+            joint_calibration[schema_joint] = {
                 "range_min": calib["range_min"],
                 "range_max": calib["range_max"],
                 "homing_offset": calib["homing_offset"],
@@ -442,3 +465,45 @@ def upload_calibration_to_twin(
     except Exception as e:
         logger.warning(f"Failed to upload calibration: {e}")
         logger.debug("Calibration upload failed, continuing without upload", exc_info=True)
+
+
+def check_calibration_required(
+    device: Union[SO101Leader, SO101Follower],
+    device_type: str,
+    twin: Optional[Twin] = None,
+    require_calibration: bool = True,
+) -> bool:
+    """Check if calibration exists and optionally raise if missing.
+
+    Args:
+        device: Leader or Follower device
+        device_type: "leader" or "follower" for error messages
+        twin: Optional twin for creating alerts
+        require_calibration: If True, raise RuntimeError when calibration is missing
+
+    Returns:
+        True if calibration exists, False otherwise
+
+    Raises:
+        RuntimeError: If require_calibration is True and calibration is missing
+    """
+    if device.calibration is not None:
+        return True
+
+    msg = (
+        f"{device_type.capitalize()} is not calibrated. "
+        f"Please calibrate using: python scripts/cw_calibrate.py --type {device_type}"
+    )
+
+    if twin is not None:
+        create_calibration_needed_alert(
+            twin,
+            device_type,
+            description=f"Please calibrate the {device_type} using the calibration script.",
+        )
+
+    if require_calibration:
+        raise RuntimeError(msg)
+    else:
+        logger.warning(msg)
+        return False

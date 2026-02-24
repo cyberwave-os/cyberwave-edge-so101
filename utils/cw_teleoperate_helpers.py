@@ -61,7 +61,7 @@ def get_teleoperate_parser() -> argparse.ArgumentParser:
 
 def teleop_loop(
     leader: SO101Leader,
-    follower: Optional[SO101Follower],
+    follower: SO101Follower,
     action_queue: queue.Queue,
     stop_event: threading.Event,
     last_observation: Dict[str, float],
@@ -87,20 +87,14 @@ def teleop_loop(
 
             timestamp, timestamp_monotonic = time_reference.update()
 
-            leader_action = leader.get_action() if leader is not None else {}
+            leader_action = leader.get_action()
+            follower_action = follower.get_observation()
 
-            follower_action = None
-            if follower is not None:
-                follower_action = follower.get_observation()
-            else:
-                follower_action = leader_action
-
-            if follower is not None and leader is not None:
-                try:
-                    follower.send_action(leader_action)
-                except Exception:
-                    if status_tracker:
-                        status_tracker.increment_errors()
+            try:
+                follower.send_action(leader_action)
+            except Exception:
+                if status_tracker:
+                    status_tracker.increment_errors()
 
             update_count, skip_count = process_cyberwave_updates(
                 action=follower_action,
