@@ -471,8 +471,10 @@ def upload_calibration_to_twin(
             "Install with: pip install cyberwave"
         )
     except Exception as e:
-        logger.warning(f"Failed to upload calibration: {e}")
-        logger.debug("Calibration upload failed, continuing without upload", exc_info=True)
+        logger.warning(
+            "Failed to upload calibration: %s. Check logs for details.", e
+        )
+        logger.exception("Calibration upload failed, continuing without upload")
 
 
 def check_calibration_required(
