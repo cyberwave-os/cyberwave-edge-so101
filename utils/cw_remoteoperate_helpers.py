@@ -18,6 +18,7 @@ from so101.leader import SO101Leader
 from utils.trackers import StatusTracker
 from utils.cw_alerts import create_calibration_needed_alert
 from utils.utils import (
+    calibration_range_to_radians,
     ensure_safe_goal_position,
     load_calibration,
     normalized_to_radians,
@@ -446,12 +447,19 @@ def upload_calibration_to_twin(
                 # Fallback if we couldn't get schema joint names
                 schema_joint = f"_{motor_id}"
 
+            norm_mode = device.motors[joint_name].norm_mode
+            lower_rad, upper_rad = calibration_range_to_radians(
+                calib["range_min"], calib["range_max"], norm_mode
+            )
+
             joint_calibration[schema_joint] = {
                 "range_min": calib["range_min"],
                 "range_max": calib["range_max"],
                 "homing_offset": calib["homing_offset"],
                 "drive_mode": str(calib["drive_mode"]),
                 "id": str(calib["id"]),
+                "lower": lower_rad,
+                "upper": upper_rad,
             }
 
         logger.info(f"Uploading {robot_type} calibration to twin {twin.uuid}...")

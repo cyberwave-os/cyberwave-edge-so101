@@ -65,6 +65,35 @@ def radians_to_normalized(
         return radians * 180.0 / math.pi
 
 
+def calibration_range_to_radians(
+    range_min: float,
+    range_max: float,
+    norm_mode: MotorNormMode,
+) -> tuple[float, float]:
+    """
+    Convert calibration range_min/range_max (encoder counts) to radians (lower, upper).
+
+    Uses the same conversion as normalized_to_radians. The frontend expects limits in radians.
+    """
+    delta_r = (range_max - range_min) / 2.0
+    delta_r_full = range_max - range_min
+    scale = 2.0 * math.pi / 4095.0
+
+    if norm_mode == MotorNormMode.RANGE_M100_100:
+        # normalized -100 -> lower, +100 -> upper
+        lower = -delta_r * scale
+        upper = delta_r * scale
+    elif norm_mode == MotorNormMode.RANGE_0_100:
+        # normalized 0 -> lower (0), 100 -> upper
+        lower = 0.0
+        upper = delta_r_full * scale
+    else:  # DEGREES - approximate
+        lower = range_min * math.pi / 180.0
+        upper = range_max * math.pi / 180.0
+
+    return (lower, upper)
+
+
 def normalized_to_radians(
     normalized: float,
     norm_mode: MotorNormMode,
