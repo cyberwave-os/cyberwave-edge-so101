@@ -64,6 +64,52 @@ def radians_to_normalized(
     else:  # DEGREES
         return radians * 180.0 / math.pi
 
+
+def normalized_to_radians(
+    normalized: float,
+    norm_mode: MotorNormMode,
+    calib: Optional[Any] = None,
+) -> float:
+    """
+    Convert normalized position to radians based on motor normalization mode and calibration.
+
+    Inverse of radians_to_normalized. Uses calibration when available for accurate conversion.
+    When calib is None, uses approximate fallback conversion.
+
+    Args:
+        normalized: Normalized position (0-100 or -100 to 100 depending on norm_mode)
+        norm_mode: Motor normalization mode
+        calib: Calibration data with range_min and range_max (optional)
+
+    Returns:
+        Position in radians
+    """
+    if calib is not None:
+        r_min = calib.range_min
+        r_max = calib.range_max
+        delta_r = (r_max - r_min) / 2.0
+        delta_r_full = r_max - r_min
+
+        if norm_mode == MotorNormMode.RANGE_M100_100:
+            raw_offset = (normalized / 100.0) * delta_r
+            return raw_offset * (2.0 * math.pi / 4095.0)
+        elif norm_mode == MotorNormMode.RANGE_0_100:
+            raw_value = r_min + (normalized / 100.0) * delta_r_full
+            return (raw_value - r_min) * (2.0 * math.pi / 4095.0)
+        else:  # DEGREES
+            return normalized * math.pi / 180.0
+
+    # Fallback without calibration
+    if norm_mode == MotorNormMode.RANGE_M100_100:
+        degrees = (normalized / 100.0) * 180.0
+        return degrees * math.pi / 180.0
+    elif norm_mode == MotorNormMode.RANGE_0_100:
+        degrees = (normalized / 100.0) * 360.0
+        return degrees * math.pi / 180.0
+    else:
+        return normalized * math.pi / 180.0
+
+
 def parse_resolution_to_enum(resolution_str: str) -> Resolution:
     """Parse resolution string to Resolution enum (cyberwave.sensor.Resolution)."""
     resolution_str = resolution_str.upper().strip()

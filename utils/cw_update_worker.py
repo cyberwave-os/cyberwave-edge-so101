@@ -1,6 +1,5 @@
 """MQTT update worker for publishing joint states to Cyberwave twin."""
 
-import math
 import queue
 import threading
 import time
@@ -10,6 +9,7 @@ from cyberwave import Twin
 
 from motors import MotorNormMode
 from utils.trackers import StatusTracker
+from utils.utils import normalized_to_radians
 
 
 def cyberwave_update_worker(
@@ -74,31 +74,7 @@ def cyberwave_update_worker(
                     )
 
                     calib = follower_calibration.get(joint_name) if follower_calibration else None
-                    if calib is not None:
-                        r_min = calib.range_min
-                        r_max = calib.range_max
-                        delta_r = (r_max - r_min) / 2.0
-
-                        if norm_mode == MotorNormMode.RANGE_M100_100:
-                            raw_offset = (normalized_position / 100.0) * delta_r
-                            position = raw_offset * (2.0 * math.pi / 4095.0)
-                        elif norm_mode == MotorNormMode.RANGE_0_100:
-                            delta_r = r_max - r_min
-                            raw_value = r_min + (normalized_position / 100.0) * delta_r
-                            position = (raw_value - r_min) * (2.0 * math.pi / 4095.0)
-                        else:
-                            position = normalized_position * math.pi / 180.0
-                    else:
-                        # Fallback without calibration (same as remoteoperate)
-                        if norm_mode == MotorNormMode.RANGE_M100_100:
-                            degrees = (normalized_position / 100.0) * 180.0
-                            position = degrees * math.pi / 180.0
-                        elif norm_mode == MotorNormMode.RANGE_0_100:
-                            degrees = (normalized_position / 100.0) * 360.0
-                            position = degrees * math.pi / 180.0
-                        else:
-                            position = normalized_position * math.pi / 180.0
-
+                    position = normalized_to_radians(normalized_position, norm_mode, calib)
                     source_type = action_data.get("source_type")
                     batch_updates[joint_index] = (
                         position,

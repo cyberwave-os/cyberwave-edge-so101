@@ -9,8 +9,6 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from motors import MotorNormMode
-
 from so101.robot import SO101_MOTORS
 
 logger = logging.getLogger(__name__)
@@ -56,12 +54,15 @@ def resolve_calibration_for_edge(
     """
     Resolve calibration for edge use, keyed by SO101 joint name.
 
-    Prefers device calibration (from local JSON). If None, fetches from twin API
-    and converts motor-ID keys to joint names.
+    Prefers device calibration from the local JSON file written by cw_calibrate.py
+    (~/.cyberwave/so101_lib/calibrations/{id}.json). This is the canonical source.
+
+    When device_calibration is None (no calibration file), falls back to twin API
 
     Args:
         twin: Cyberwave Twin instance (robot twin)
-        device_calibration: Local calibration from device (joint_name -> calib dict/object)
+        device_calibration: Local calibration from device (joint_name -> calib dict/object).
+            Loaded by SO101Leader/SO101Follower from calibrations/{id}.json written by cw_calibrate.
         robot_type: "leader" or "follower"
 
     Returns:
@@ -129,7 +130,9 @@ def resolve_calibration_for_edge(
         return None
 
 
-def build_motor_id_to_schema_joint(twin: Any, motors: Optional[Dict[str, Any]] = None) -> Dict[int, str]:
+def build_motor_id_to_schema_joint(
+    twin: Any, motors: Optional[Dict[str, Any]] = None
+) -> Dict[int, str]:
     """
     Build mapping from motor ID to twin schema joint name (e.g. 1 -> "_1").
 

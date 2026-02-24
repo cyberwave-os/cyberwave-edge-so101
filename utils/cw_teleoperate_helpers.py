@@ -2,7 +2,6 @@
 
 import argparse
 import logging
-import math
 import os
 import queue
 import threading
@@ -16,6 +15,7 @@ from so101.follower import SO101Follower
 from so101.leader import SO101Leader
 from utils.cw_update_worker import process_cyberwave_updates
 from utils.trackers import StatusTracker
+from utils.utils import normalized_to_radians
 
 logger = logging.getLogger(__name__)
 
@@ -154,33 +154,8 @@ def publish_initial_follower_observation(
         joint_index = follower.motors[name].id
         norm_mode = joint_name_to_norm_mode.get(name, MotorNormMode.RANGE_M100_100)
 
-        if follower_calibration and name in follower_calibration:
-            calib = follower_calibration[name]
-            r_min = calib.range_min
-            r_max = calib.range_max
-            delta_r = (r_max - r_min) / 2.0
-
-            if norm_mode == MotorNormMode.RANGE_M100_100:
-                raw_offset = (normalized_pos / 100.0) * delta_r
-                radians = raw_offset * (2.0 * math.pi / 4095.0)
-            elif norm_mode == MotorNormMode.RANGE_0_100:
-                center_normalized = 50.0
-                offset_normalized = normalized_pos - center_normalized
-                raw_offset = (offset_normalized / 100.0) * delta_r
-                radians = raw_offset * (2.0 * math.pi / 4095.0)
-            else:
-                radians = normalized_pos * math.pi / 180.0
-        else:
-            # Fallback without calibration (same as remoteoperate)
-            if norm_mode == MotorNormMode.RANGE_M100_100:
-                degrees = (normalized_pos / 100.0) * 180.0
-                radians = degrees * math.pi / 180.0
-            elif norm_mode == MotorNormMode.RANGE_0_100:
-                degrees = (normalized_pos / 100.0) * 360.0
-                radians = degrees * math.pi / 180.0
-            else:
-                radians = normalized_pos * math.pi / 180.0
-
+        calib = follower_calibration.get(name) if follower_calibration else None
+        radians = normalized_to_radians(normalized_pos, norm_mode, calib)
         schema_joint = motor_id_to_schema_joint.get(joint_index, f"_{joint_index}")
         observations[schema_joint] = radians
 

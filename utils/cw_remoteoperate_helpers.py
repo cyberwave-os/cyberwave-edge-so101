@@ -2,7 +2,6 @@
 
 import argparse
 import logging
-import math
 import os
 import queue
 import threading
@@ -10,13 +9,19 @@ import time
 from typing import Any, Callable, Dict, Optional, Union
 
 from cyberwave import Twin
+from cyberwave.constants import SOURCE_TYPE_EDGE_FOLLOWER
 
 from motors import MotorNormMode
 from scripts.cw_write_position import validate_position
 from so101.follower import SO101Follower
 from so101.leader import SO101Leader
 from utils.trackers import StatusTracker
-from utils.utils import ensure_safe_goal_position, load_calibration, radians_to_normalized
+from utils.utils import (
+    ensure_safe_goal_position,
+    load_calibration,
+    normalized_to_radians,
+    radians_to_normalized,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,43 +91,17 @@ def joint_position_heartbeat_thread(
                 if norm_mode is None:
                     continue
 
-                if follower_calibration and name in follower_calibration:
-                    calib = follower_calibration[name]
-                    r_min = calib.range_min
-                    r_max = calib.range_max
-                    delta_r = (r_max - r_min) / 2.0
-
-                    if norm_mode == MotorNormMode.RANGE_M100_100:
-                        raw_offset = (normalized_pos / 100.0) * delta_r
-                        radians = raw_offset * (2.0 * math.pi / 4095.0)
-                    elif norm_mode == MotorNormMode.RANGE_0_100:
-                        delta_r_full = r_max - r_min
-                        raw_value = r_min + (normalized_pos / 100.0) * delta_r_full
-                        radians = (raw_value - r_min) * (2.0 * math.pi / 4095.0)
-                    else:
-                        radians = normalized_pos * math.pi / 180.0
-                else:
-                    if norm_mode == MotorNormMode.RANGE_M100_100:
-                        degrees = (normalized_pos / 100.0) * 180.0
-                        radians = degrees * math.pi / 180.0
-                    elif norm_mode == MotorNormMode.RANGE_0_100:
-                        degrees = (normalized_pos / 100.0) * 360.0
-                        radians = degrees * math.pi / 180.0
-                    else:
-                        radians = normalized_pos * math.pi / 180.0
-
+                calib = follower_calibration.get(name) if follower_calibration else None
+                radians = normalized_to_radians(normalized_pos, norm_mode, calib)
                 schema_joint = motor_id_to_schema_joint.get(joint_index, f"_{joint_index}")
                 joint_positions[schema_joint] = radians
 
             if joint_positions:
-                timestamp = time.time()
-                for schema_joint, radians in joint_positions.items():
-                    mqtt_client.update_joint_state(
-                        twin_uuid=twin_uuid,
-                        joint_name=schema_joint,
-                        position=radians,
-                        timestamp=timestamp,
-                    )
+                mqtt_client.update_joints_state(
+                    twin_uuid=twin_uuid,
+                    joint_positions=joint_positions,
+                    source_type=SOURCE_TYPE_EDGE_FOLLOWER,
+                )
         except Exception:
             pass
         time.sleep(interval)
