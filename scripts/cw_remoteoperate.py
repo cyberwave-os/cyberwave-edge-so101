@@ -194,17 +194,18 @@ def remoteoperate(
         # Get follower's current observation (normalized positions)
         follower_obs = follower.get_observation()
 
-        # Convert to joint index format for initial observation using calibration
+        # Convert to schema joint format for initial observation (same as teleoperate)
         observations = {}
         for joint_key, normalized_pos in follower_obs.items():
             name = joint_key.removesuffix(".pos")
             if name in follower.motors:
                 joint_index = follower.motors[name].id
                 norm_mode = joint_name_to_norm_mode[name]
+                schema_joint = motor_id_to_schema_joint.get(joint_index, f"_{joint_index}")
 
                 calib = follower_calibration.get(name) if follower_calibration else None
                 radians = normalized_to_radians(normalized_pos, norm_mode, calib)
-                observations[joint_index] = radians
+                observations[schema_joint] = radians
 
         # Send initial observation
         mqtt_client.publish_initial_observation(

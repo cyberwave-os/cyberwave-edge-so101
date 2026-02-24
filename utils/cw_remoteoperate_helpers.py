@@ -81,7 +81,7 @@ def joint_position_heartbeat_thread(
                 time.sleep(interval)
                 continue
 
-            joint_positions: Dict[str, float] = {}
+            timestamp = time.time()
             for joint_key, normalized_pos in follower_obs.items():
                 name = joint_key.removesuffix(".pos")
                 if name not in follower.motors:
@@ -94,12 +94,11 @@ def joint_position_heartbeat_thread(
                 calib = follower_calibration.get(name) if follower_calibration else None
                 radians = normalized_to_radians(normalized_pos, norm_mode, calib)
                 schema_joint = motor_id_to_schema_joint.get(joint_index, f"_{joint_index}")
-                joint_positions[schema_joint] = radians
-
-            if joint_positions:
-                mqtt_client.update_joints_state(
+                mqtt_client.update_joint_state(
                     twin_uuid=twin_uuid,
-                    joint_positions=joint_positions,
+                    joint_name=schema_joint,
+                    position=radians,
+                    timestamp=timestamp,
                     source_type=SOURCE_TYPE_EDGE_FOLLOWER,
                 )
         except Exception:

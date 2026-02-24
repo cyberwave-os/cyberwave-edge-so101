@@ -256,7 +256,7 @@ def run_status_logging_thread(
                         "🟢" if webrtc == "streaming" else ("🟡" if webrtc == "connecting" else "🔴")
                     )
                     lines.append(
-                        f"  {cam_name}: Cam{cam_icon} WebRTC{webrtc_icon} ({cam_uuid}...)"[:70].ljust(
+                        f"  {cam_name}: Cam{cam_icon} WebRTC{webrtc_icon} ({cam_uuid})"[:70].ljust(
                             70
                         )
                     )
