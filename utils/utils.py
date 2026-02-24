@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from cyberwave import Cyberwave as cw
 from cyberwave import EdgeController
+from cyberwave.sensor import Resolution
 
 from motors import MotorNormMode
 
@@ -23,6 +24,73 @@ def setup_logging(level: int = logging.INFO) -> None:
         level=level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+def radians_to_normalized(
+    radians: float,
+    norm_mode: MotorNormMode,
+    calib: Optional[Any] = None,
+) -> float:
+    """
+    Convert radians to normalized position based on motor normalization mode and calibration.
+
+    This is the inverse of teleoperate's normalized->radians conversion.
+    Uses calibration data when available for accurate conversion.
+
+    Args:
+        radians: Position in radians
+        norm_mode: Motor normalization mode
+        calib: Calibration data with range_min and range_max (optional)
+
+    Returns:
+        Normalized position value
+    """
+    if calib is None:
+        raise ValueError("Calibration data is required")
+    r_min = calib.range_min
+    r_max = calib.range_max
+    delta_r = (r_max - r_min) / 2.0
+
+    if norm_mode == MotorNormMode.RANGE_M100_100:
+        raw_offset = radians / (2.0 * math.pi / 4095.0)
+        normalized = (raw_offset / delta_r) * 100.0
+        return normalized
+    elif norm_mode == MotorNormMode.RANGE_0_100:
+        delta_r_full = r_max - r_min
+        raw_value = radians / (2.0 * math.pi / 4095.0) + r_min
+        normalized = ((raw_value - r_min) / delta_r_full) * 100.0
+        return normalized
+    else:  # DEGREES
+        return radians * 180.0 / math.pi
+
+def parse_resolution_to_enum(resolution_str: str) -> Resolution:
+    """Parse resolution string to Resolution enum (cyberwave.sensor.Resolution)."""
+    resolution_str = resolution_str.upper().strip()
+    resolution_map = {
+        "QVGA": Resolution.QVGA,
+        "VGA": Resolution.VGA,
+        "SVGA": Resolution.SVGA,
+        "HD": Resolution.HD,
+        "720P": Resolution.HD,
+        "FULL_HD": Resolution.FULL_HD,
+        "1080P": Resolution.FULL_HD,
+    }
+    if resolution_str in resolution_map:
+        return resolution_map[resolution_str]
+    if "x" in resolution_str.lower():
+        try:
+            width, height = resolution_str.lower().split("x")
+            width, height = int(width), int(height)
+            match = Resolution.from_size(width, height)
+            if match:
+                return match
+            return Resolution.closest(width, height)
+        except ValueError:
+            pass
+    raise ValueError(
+        f"Invalid resolution: {resolution_str}. "
+        "Use QVGA, VGA, SVGA, HD, FULL_HD, or WIDTHxHEIGHT format."
     )
 
 

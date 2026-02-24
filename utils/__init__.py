@@ -1,10 +1,9 @@
 """SO101 utility modules."""
 
-from utils.alerts import (
+from utils.cw_alerts import (
     create_calibration_needed_alert,
     create_high_error_rate_alert,
     create_mqtt_disconnected_alert,
-    create_session_started_alert,
     create_temperature_alert,
 )
 from utils.temperature import read_temperatures
@@ -18,5 +17,4 @@ __all__ = [
     "create_mqtt_disconnected_alert",
     "create_high_error_rate_alert",
     "create_calibration_needed_alert",
-    "create_session_started_alert",
 ]

@@ -1,0 +1,412 @@
+"""Helper functions for cw_remoteoperate script."""
+
+import logging
+import math
+import queue
+import threading
+import time
+from typing import Any, Callable, Dict, Optional
+
+from cyberwave import Twin
+from motors import MotorNormMode
+
+from scripts.cw_write_position import validate_position
+from so101.follower import SO101Follower
+from utils.trackers import StatusTracker
+from utils.utils import ensure_safe_goal_position, load_calibration, radians_to_normalized
+
+logger = logging.getLogger(__name__)
+
+
+def joint_position_heartbeat_thread(
+    follower: SO101Follower,
+    mqtt_client: Any,
+    twin_uuid: str,
+    joint_name_to_norm_mode: Dict[str, MotorNormMode],
+    follower_calibration: Optional[Dict[str, Any]],
+    motor_id_to_schema_joint: Dict[int, str],
+    stop_event: threading.Event,
+    interval: float = 1.0,
+) -> None:
+    """
+    Thread that publishes the follower's current joint positions via MQTT every second.
+
+    Keeps the remote operator in sync with the actual follower position to avoid mismatches.
+    """
+    while not stop_event.is_set():
+        try:
+            if not mqtt_client or not mqtt_client.connected:
+                time.sleep(interval)
+                continue
+
+            follower_obs = follower.get_observation()
+            if not follower_obs:
+                time.sleep(interval)
+                continue
+
+            joint_positions: Dict[str, float] = {}
+            for joint_key, normalized_pos in follower_obs.items():
+                name = joint_key.removesuffix(".pos")
+                if name not in follower.motors:
+                    continue
+                joint_index = follower.motors[name].id
+                norm_mode = joint_name_to_norm_mode.get(name)
+                if norm_mode is None:
+                    continue
+
+                if follower_calibration and name in follower_calibration:
+                    calib = follower_calibration[name]
+                    r_min = calib.range_min
+                    r_max = calib.range_max
+                    delta_r = (r_max - r_min) / 2.0
+
+                    if norm_mode == MotorNormMode.RANGE_M100_100:
+                        raw_offset = (normalized_pos / 100.0) * delta_r
+                        radians = raw_offset * (2.0 * math.pi / 4095.0)
+                    elif norm_mode == MotorNormMode.RANGE_0_100:
+                        delta_r_full = r_max - r_min
+                        raw_value = r_min + (normalized_pos / 100.0) * delta_r_full
+                        radians = (raw_value - r_min) * (2.0 * math.pi / 4095.0)
+                    else:
+                        radians = normalized_pos * math.pi / 180.0
+                else:
+                    if norm_mode == MotorNormMode.RANGE_M100_100:
+                        degrees = (normalized_pos / 100.0) * 180.0
+                        radians = degrees * math.pi / 180.0
+                    elif norm_mode == MotorNormMode.RANGE_0_100:
+                        degrees = (normalized_pos / 100.0) * 360.0
+                        radians = degrees * math.pi / 180.0
+                    else:
+                        radians = normalized_pos * math.pi / 180.0
+
+                schema_joint = motor_id_to_schema_joint.get(
+                    joint_index, f"_{joint_index}"
+                )
+                joint_positions[schema_joint] = radians
+
+            if joint_positions:
+                timestamp = time.time()
+                for schema_joint, radians in joint_positions.items():
+                    mqtt_client.update_joint_state(
+                        twin_uuid=twin_uuid,
+                        joint_name=schema_joint,
+                        position=radians,
+                        timestamp=timestamp,
+                    )
+        except Exception:
+            pass
+        time.sleep(interval)
+
+
+def motor_writer_worker(
+    action_queue: queue.Queue,
+    follower: SO101Follower,
+    stop_event: threading.Event,
+    status_tracker: Optional[StatusTracker] = None,
+) -> None:
+    """
+    Worker thread that reads actions from queue and writes to follower motors.
+
+    Splits large position changes into multiple smaller steps based on max_relative_target.
+    """
+    while not stop_event.is_set():
+        try:
+            try:
+                action = action_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            try:
+                if follower.config.max_relative_target is not None:
+                    present_pos = follower.get_observation()
+                    if not present_pos:
+                        continue
+                    current_pos = {
+                        key.removesuffix(".pos"): val for key, val in present_pos.items()
+                    }
+
+                    goal_pos = {
+                        key.removesuffix(".pos"): val
+                        for key, val in action.items()
+                        if key.endswith(".pos")
+                    }
+                    for key, val in action.items():
+                        if not key.endswith(".pos") and key in follower.motors:
+                            goal_pos[key] = val
+                            if key not in current_pos:
+                                current_pos[key] = 0.0
+
+                    max_steps = 1
+                    for joint_name, goal_val in goal_pos.items():
+                        current_val = current_pos.get(joint_name, 0.0)
+                        diff = abs(goal_val - current_val)
+                        if diff > 0.01:
+                            steps_needed = int(diff / follower.config.max_relative_target) + 1
+                            max_steps = max(max_steps, steps_needed)
+
+                    for _ in range(max_steps):
+                        remaining_movements = {}
+                        for joint_name, goal_val in goal_pos.items():
+                            current_val = current_pos.get(joint_name, 0.0)
+                            diff = abs(goal_val - current_val)
+                            if diff > 0.01:
+                                remaining_movements[joint_name] = goal_val
+
+                        if not remaining_movements:
+                            break
+
+                        goal_present_pos = {
+                            key: (goal_pos[key], current_pos.get(key, 0.0))
+                            for key in remaining_movements.keys()
+                        }
+
+                        safe_goal_pos = ensure_safe_goal_position(
+                            goal_present_pos, follower.config.max_relative_target
+                        )
+
+                        for name, pos in safe_goal_pos.items():
+                            current_pos[name] = pos
+
+                        safe_action = {f"{name}.pos": pos for name, pos in safe_goal_pos.items()}
+
+                        original_max_relative = follower.config.max_relative_target
+                        follower.config.max_relative_target = None
+
+                        try:
+                            goal_pos_for_bus = {
+                                key.removesuffix(".pos"): val for key, val in safe_action.items()
+                            }
+                            follower.bus.sync_write(
+                                "Goal_Position", goal_pos_for_bus, normalize=True
+                            )
+                            if status_tracker:
+                                status_tracker.increment_processed()
+                        finally:
+                            follower.config.max_relative_target = original_max_relative
+                else:
+                    follower.send_action(action)
+                    if status_tracker:
+                        status_tracker.increment_processed()
+
+            except Exception:
+                if status_tracker:
+                    status_tracker.increment_errors()
+            finally:
+                action_queue.task_done()
+
+        except Exception:
+            if status_tracker:
+                status_tracker.increment_errors()
+
+
+def create_joint_state_callback(
+    current_state: Dict[str, float],
+    action_queue: queue.Queue,
+    joint_index_to_name: Dict[int, str],
+    joint_name_to_norm_mode: Dict[str, MotorNormMode],
+    follower: SO101Follower,
+    follower_calibration: Optional[Dict[str, Any]] = None,
+    status_tracker: Optional[StatusTracker] = None,
+) -> Callable[[str, Dict], None]:
+    """Create a callback function for MQTT joint state updates."""
+    def callback(topic: str, data: Dict) -> None:
+        if status_tracker:
+            status_tracker.increment_received()
+
+        try:
+            if not topic.endswith("/update"):
+                if status_tracker:
+                    status_tracker.increment_filtered()
+                return
+
+            if "joint_name" in data and "joint_state" in data:
+                process_single_joint_update(
+                    data, current_state, action_queue, joint_index_to_name,
+                    joint_name_to_norm_mode, follower, follower_calibration, status_tracker,
+                )
+                return
+
+            action = current_state.copy()
+            joint_states_for_status = {}
+            any_valid = False
+            for joint_name, position_val in data.items():
+                if joint_name in ("source_type", "timestamp", "session_id", "type"):
+                    continue
+                if joint_name not in follower.motors:
+                    continue
+                try:
+                    position_radians = float(position_val)
+                except (ValueError, TypeError):
+                    continue
+
+                norm_mode = joint_name_to_norm_mode.get(joint_name)
+                if norm_mode is None:
+                    continue
+                calib = follower_calibration.get(joint_name) if follower_calibration else None
+                normalized_position = radians_to_normalized(position_radians, norm_mode, calib)
+                motor_id = follower.motors[joint_name].id
+                is_valid, _ = validate_position(motor_id, normalized_position)
+                if not is_valid:
+                    if status_tracker:
+                        status_tracker.increment_filtered()
+                    continue
+
+                action[f"{joint_name}.pos"] = normalized_position
+                current_state[f"{joint_name}.pos"] = normalized_position
+                joint_states_for_status[str(motor_id)] = position_radians
+                any_valid = True
+
+            if any_valid:
+                if status_tracker:
+                    status_tracker.update_joint_states(joint_states_for_status)
+                try:
+                    action_queue.put_nowait(action)
+                except queue.Full:
+                    if status_tracker:
+                        status_tracker.increment_errors()
+
+        except Exception:
+            if status_tracker:
+                status_tracker.increment_errors()
+
+    return callback
+
+
+def _apply_joint_position(
+    joint_name: str,
+    position_radians: float,
+    current_state: Dict[str, float],
+    action_queue: queue.Queue,
+    joint_index_to_name: Dict[int, str],
+    joint_name_to_norm_mode: Dict[str, MotorNormMode],
+    follower: SO101Follower,
+    follower_calibration: Optional[Dict[str, Any]],
+    status_tracker: Optional[StatusTracker],
+) -> None:
+    """Apply a single joint position to the action queue."""
+    norm_mode = joint_name_to_norm_mode.get(joint_name)
+    if norm_mode is None:
+        return
+    calib = follower_calibration.get(joint_name) if follower_calibration else None
+    normalized_position = radians_to_normalized(position_radians, norm_mode, calib)
+    motor_id = follower.motors[joint_name].id
+    is_valid, _ = validate_position(motor_id, normalized_position)
+    if not is_valid:
+        if status_tracker:
+            status_tracker.increment_filtered()
+        return
+    action = current_state.copy()
+    action[f"{joint_name}.pos"] = normalized_position
+    current_state[f"{joint_name}.pos"] = normalized_position
+    if status_tracker:
+        joint_states = {str(motor_id): position_radians}
+        status_tracker.update_joint_states(joint_states)
+    try:
+        action_queue.put_nowait(action)
+    except queue.Full:
+        if status_tracker:
+            status_tracker.increment_errors()
+
+
+def process_single_joint_update(
+    data: Dict,
+    current_state: Dict[str, float],
+    action_queue: queue.Queue,
+    joint_index_to_name: Dict[int, str],
+    joint_name_to_norm_mode: Dict[str, MotorNormMode],
+    follower: SO101Follower,
+    follower_calibration: Optional[Dict[str, Any]],
+    status_tracker: Optional[StatusTracker],
+) -> None:
+    """Process single-joint format: joint_name + joint_state."""
+    joint_name_str = data.get("joint_name")
+    joint_state = data.get("joint_state", {})
+    position_radians = joint_state.get("position")
+
+    if position_radians is None:
+        if status_tracker:
+            status_tracker.increment_errors()
+        return
+
+    joint_index = None
+    try:
+        joint_index = int(joint_name_str)
+    except (ValueError, TypeError):
+        for idx, name in joint_index_to_name.items():
+            if name == joint_name_str:
+                joint_index = idx
+                break
+        if joint_index is None:
+            if status_tracker:
+                status_tracker.increment_errors()
+            return
+
+    joint_name = joint_index_to_name.get(joint_index)
+    if joint_name is None:
+        if status_tracker:
+            status_tracker.increment_errors()
+        return
+
+    try:
+        position_radians = float(position_radians)
+    except (ValueError, TypeError):
+        if status_tracker:
+            status_tracker.increment_errors()
+        return
+
+    _apply_joint_position(
+        joint_name=joint_name,
+        position_radians=position_radians,
+        current_state=current_state,
+        action_queue=action_queue,
+        joint_index_to_name=joint_index_to_name,
+        joint_name_to_norm_mode=joint_name_to_norm_mode,
+        follower=follower,
+        follower_calibration=follower_calibration,
+        status_tracker=status_tracker,
+    )
+
+
+def upload_calibration_to_twin(
+    follower: SO101Follower,
+    twin: Twin,
+    robot_type: str = "follower",
+) -> None:
+    """Upload calibration data from follower device to Cyberwave twin."""
+    try:
+        calibration_path = follower.config.calibration_dir / f"{follower.config.id}.json"
+
+        if not calibration_path.exists():
+            logger.debug(f"No calibration file found at {calibration_path}, skipping upload")
+            return
+
+        calib_data = load_calibration(calibration_path)
+
+        joint_calibration = {}
+        for joint_name, calib in calib_data.items():
+            if joint_name not in follower.motors:
+                logger.warning(f"Joint '{joint_name}' not found in follower motors, skipping")
+                continue
+
+            motor_id = follower.motors[joint_name].id
+            motor_id_str = str(motor_id)
+
+            joint_calibration[motor_id_str] = {
+                "range_min": calib["range_min"],
+                "range_max": calib["range_max"],
+                "homing_offset": calib["homing_offset"],
+                "drive_mode": str(calib["drive_mode"]),
+                "id": str(calib["id"]),
+            }
+
+        logger.info(f"Uploading {robot_type} calibration to twin {twin.uuid}...")
+        twin.update_calibration(joint_calibration, robot_type=robot_type)
+        logger.info(f"Calibration uploaded successfully to twin {twin.uuid}")
+    except ImportError:
+        logger.warning(
+            "Cyberwave SDK not installed. Skipping calibration upload. "
+            "Install with: pip install cyberwave"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to upload calibration: {e}")
+        logger.debug("Calibration upload failed, continuing without upload", exc_info=True)

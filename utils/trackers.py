@@ -5,10 +5,9 @@ import threading
 import time
 from typing import Any, Dict, List, Literal, Optional
 
-from utils.alerts import (
+from utils.cw_alerts import (
     create_high_error_rate_alert,
     create_mqtt_disconnected_alert,
-    create_session_started_alert,
     create_temperature_alert,
 )
 from utils.temperature import read_temperatures
@@ -188,10 +187,6 @@ def run_status_logging_thread(
     # Hide cursor
     sys.stdout.write("\033[?25l")
     sys.stdout.flush()
-
-    # Fire session-started alert once to verify alert pipeline works
-    if robot is not None:
-        create_session_started_alert(robot, mode)
 
     try:
         while not stop_event.is_set():

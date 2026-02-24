@@ -7,7 +7,6 @@ import logging
 import math
 import os
 import queue
-import select
 import sys
 import threading
 import time
@@ -40,43 +39,14 @@ from motors import MotorNormMode
 from scripts.cw_setup import load_setup_config
 from so101.follower import SO101Follower
 from so101.leader import SO101Leader
-from utils.alerts import create_calibration_needed_alert
 from utils.config import get_setup_config_path
+from utils.cw_alerts import create_calibration_needed_alert
 from utils.cw_update_worker import cyberwave_update_worker, process_cyberwave_updates
+from utils.keyboard import keyboard_input_thread
 from utils.trackers import StatusTracker, run_status_logging_thread
 from utils.utils import load_calibration
 
 logger = logging.getLogger(__name__)
-
-
-def _keyboard_input_thread(stop_event: threading.Event) -> None:
-    """
-    Thread to monitor keyboard input for 'q' key to stop the loop gracefully.
-
-    Args:
-        stop_event: Event to set when 'q' is pressed
-    """
-    if sys.stdin.isatty():
-        # Only enable keyboard input if running in a terminal
-        try:
-            import termios
-            import tty
-
-            old_settings = termios.tcgetattr(sys.stdin)
-            tty.setraw(sys.stdin.fileno())
-
-            try:
-                while not stop_event.is_set():
-                    if select.select([sys.stdin], [], [], 0.1)[0]:
-                        char = sys.stdin.read(1)
-                        if char == "q" or char == "Q":
-                            stop_event.set()
-                            break
-            finally:
-                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-        except (ImportError, OSError):
-            # If termios is not available (e.g., Windows), keyboard input disabled
-            pass
 
 
 CONTROL_RATE_HZ = 100
@@ -301,6 +271,17 @@ def teleoperate(
         if robot is not None:
             _upload_calibration_to_twin(leader, robot, "leader")
 
+    # Require follower calibration when sending to Cyberwave (robot twin)
+    if follower is not None and robot is not None and follower.calibration is None:
+        create_calibration_needed_alert(
+            robot,
+            "follower",
+            description="Please calibrate the follower using the calibration script.",
+        )
+        raise RuntimeError(
+            "Follower is not calibrated. Please calibrate the follower first using the calibration script."
+        )
+
     # Upload follower calibration to twin if available
     if follower is not None and follower.calibration is not None and robot is not None:
         _upload_calibration_to_twin(follower, robot, "follower")
@@ -363,7 +344,7 @@ def teleoperate(
 
     # Start keyboard input thread for 'q' key to stop gracefully
     keyboard_thread = threading.Thread(
-        target=_keyboard_input_thread,
+        target=keyboard_input_thread,
         args=(stop_event,),
         daemon=True,
     )
@@ -525,16 +506,7 @@ def teleoperate(
                         else:  # DEGREES
                             radians = normalized_pos * math.pi / 180.0
                     else:
-                        # Fallback if no calibration
-                        norm_mode = joint_name_to_norm_mode[name]
-                        if norm_mode == MotorNormMode.RANGE_M100_100:
-                            degrees = (normalized_pos / 100.0) * 180.0
-                            radians = degrees * math.pi / 180.0
-                        elif norm_mode == MotorNormMode.RANGE_0_100:
-                            degrees = (normalized_pos / 100.0) * 360.0
-                            radians = degrees * math.pi / 180.0
-                        else:
-                            radians = normalized_pos * math.pi / 180.0
+                        raise Exception(f"No calibration found for joint: {name}")
                     # Use schema joint name (e.g. "_1", "_2") for MQTT
                     schema_joint = motor_id_to_schema_joint.get(
                         joint_index, f"_{joint_index}"
