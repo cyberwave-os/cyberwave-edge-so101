@@ -88,8 +88,6 @@ def _teleop_loop(
     stop_event: threading.Event,
     last_observation: Dict[str, Dict[str, float]],
     position_threshold: float,
-    velocity_threshold: float,
-    effort_threshold: float,
     time_reference: TimeReference,
     status_tracker: Optional[StatusTracker] = None,
     heartbeat_interval: float = 1.0,
@@ -107,8 +105,6 @@ def _teleop_loop(
         stop_event: Event to signal loop to stop
         last_observation: Dictionary tracking last sent observation state (normalized positions)
         position_threshold: Minimum change in normalized position to trigger update
-        velocity_threshold: Unused (kept for compatibility)
-        effort_threshold: Unused (kept for compatibility)
         time_reference: TimeReference instance
         heartbeat_interval: Interval in seconds to send heartbeat if no changes (default 1.0)
         control_rate_hz: Control loop frequency in Hz (always 100 for SO101)
@@ -158,8 +154,6 @@ def _teleop_loop(
                 last_observation=last_observation,
                 action_queue=action_queue,
                 position_threshold=position_threshold,
-                velocity_threshold=velocity_threshold,
-                effort_threshold=effort_threshold,
                 timestamp=timestamp,
                 status_tracker=status_tracker,
                 last_send_times=last_send_times,
@@ -556,8 +550,6 @@ def teleoperate(
                 stop_event=stop_event,
                 last_observation=last_observation,
                 position_threshold=position_threshold,
-                velocity_threshold=velocity_threshold,
-                effort_threshold=effort_threshold,
                 time_reference=time_reference,
                 status_tracker=status_tracker,
             )
