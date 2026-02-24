@@ -191,8 +191,6 @@ def teleoperate(
     robot: Optional[Twin] = None,
     cameras: Optional[List[Dict[str, Any]]] = None,
     position_threshold: float = 0.1,
-    velocity_threshold: float = 100.0,
-    effort_threshold: float = 0.1,
 ) -> None:
     """
     Run teleoperation loop: read from leader, send to follower, and send follower data to Cyberwave.
@@ -216,8 +214,6 @@ def teleoperate(
             (camera_id, camera_type, camera_resolution, fps, enable_depth, etc.).
             CameraStreamManager uses these directly.
         position_threshold: Minimum change in position to trigger an update (in normalized units)
-        velocity_threshold: Minimum change in velocity to trigger an update
-        effort_threshold: Minimum change in effort to trigger an update
     """
     time_reference = TimeReference()
 
