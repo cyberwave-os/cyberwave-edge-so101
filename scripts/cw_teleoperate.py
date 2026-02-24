@@ -1,8 +1,6 @@
 """Teleoperation loop for SO101 leader and follower."""
 
 import argparse
-import asyncio
-import json
 import logging
 import math
 import os
@@ -11,23 +9,15 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from cyberwave import Cyberwave, Twin
-
-# Import camera configuration and stream manager from cyberwave SDK
-from cyberwave.sensor import (
-    CameraStreamManager,
-    Resolution,
-)
+from cyberwave.sensor import CameraStreamManager, Resolution
 from cyberwave.utils import TimeReference
 from dotenv import load_dotenv
 
-# RealSense is optional - only import if available
 try:
-    from cyberwave.sensor import (
-        RealSenseDiscovery,
-    )
+    from cyberwave.sensor import RealSenseDiscovery
 
     _has_realsense = True
 except ImportError:
@@ -41,112 +31,14 @@ from so101.follower import SO101Follower
 from so101.leader import SO101Leader
 from utils.config import get_setup_config_path
 from utils.cw_alerts import create_calibration_needed_alert
-from utils.cw_update_worker import cyberwave_update_worker, process_cyberwave_updates
+from utils.cw_remoteoperate_helpers import upload_calibration_to_twin
+from utils.cw_teleoperate_helpers import CONTROL_RATE_HZ, teleop_loop
+from utils.cw_update_worker import cyberwave_update_worker
 from utils.keyboard import keyboard_input_thread
 from utils.trackers import StatusTracker, run_status_logging_thread
-from utils.utils import load_calibration
+from utils.utils import parse_resolution_to_enum
 
 logger = logging.getLogger(__name__)
-
-
-CONTROL_RATE_HZ = 100
-
-
-def _teleop_loop(
-    leader: SO101Leader,
-    follower: Optional[SO101Follower],
-    action_queue: queue.Queue,
-    stop_event: threading.Event,
-    last_observation: Dict[str, Dict[str, float]],
-    position_threshold: float,
-    time_reference: TimeReference,
-    status_tracker: Optional[StatusTracker] = None,
-    heartbeat_interval: float = 1.0,
-    control_rate_hz: int = CONTROL_RATE_HZ,
-) -> tuple[int, int]:
-    """
-    Main teleoperation loop: read from leader, send to follower, send data to Cyberwave.
-
-    The loop always runs at 100Hz for responsive robot control and MQTT updates.
-
-    Args:
-        leader: SO101Leader instance
-        follower: Optional SO101Follower instance (required when sending to Cyberwave)
-        action_queue: Queue for Cyberwave updates
-        stop_event: Event to signal loop to stop
-        last_observation: Dictionary tracking last sent observation state (normalized positions)
-        position_threshold: Minimum change in normalized position to trigger update
-        time_reference: TimeReference instance
-        heartbeat_interval: Interval in seconds to send heartbeat if no changes (default 1.0)
-        control_rate_hz: Control loop frequency in Hz (always 100 for SO101)
-    Returns:
-        Tuple of (update_count, skip_count)
-    """
-    total_update_count = 0
-    total_skip_count = 0
-
-    # Track last send time per joint for heartbeat
-    last_send_times: Dict[str, float] = {}
-
-    # Control loop timing - always run at control_rate_hz for responsive control
-    control_frame_time = 1.0 / control_rate_hz
-
-    try:
-        while not stop_event.is_set():
-            loop_start = time.time()
-
-            # Generate timestamp for this iteration (before reading action)
-            # This runs at 100Hz to provide fresh timestamps for camera sync
-            timestamp, timestamp_monotonic = time_reference.update()
-
-            # Read action from leader (for sending to follower)
-            leader_action = leader.get_action() if leader is not None else {}
-
-            # Read follower observation (for sending to Cyberwave - this is the actual robot state)
-            follower_action = None
-            if follower is not None:
-                follower_action = follower.get_observation()
-            else:
-                # Fallback to leader if no follower (shouldn't happen when robot twin is provided)
-                follower_action = leader_action
-
-            # Send action to follower if provided - always do this at control_rate_hz
-            if follower is not None and leader is not None:
-                try:
-                    # Send leader action to follower (follower handles safety limits and normalization)
-                    follower.send_action(leader_action)
-                except Exception:
-                    if status_tracker:
-                        status_tracker.increment_errors()
-
-            # Process Cyberwave updates every loop (100Hz)
-            update_count, skip_count = process_cyberwave_updates(
-                action=follower_action,
-                last_observation=last_observation,
-                action_queue=action_queue,
-                position_threshold=position_threshold,
-                timestamp=timestamp,
-                status_tracker=status_tracker,
-                last_send_times=last_send_times,
-                heartbeat_interval=heartbeat_interval,
-            )
-            total_update_count += update_count
-            total_skip_count += skip_count
-
-            # Rate limiting - maintain control_rate_hz
-            elapsed = time.time() - loop_start
-            sleep_time = control_frame_time - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-
-    except KeyboardInterrupt:
-        pass
-    except Exception:
-        if status_tracker:
-            status_tracker.increment_errors()
-        raise
-
-    return total_update_count, total_skip_count
 
 
 def teleoperate(
@@ -269,7 +161,7 @@ def teleoperate(
             )
         # Upload leader calibration to twin if robot twin is provided
         if robot is not None:
-            _upload_calibration_to_twin(leader, robot, "leader")
+            upload_calibration_to_twin(leader, robot, "leader")
 
     # Require follower calibration when sending to Cyberwave (robot twin)
     if follower is not None and robot is not None and follower.calibration is None:
@@ -284,7 +176,7 @@ def teleoperate(
 
     # Upload follower calibration to twin if available
     if follower is not None and follower.calibration is not None and robot is not None:
-        _upload_calibration_to_twin(follower, robot, "follower")
+        upload_calibration_to_twin(follower, robot, "follower")
 
     # Use follower motors for mappings when sending to Cyberwave (follower data is what we send)
     # Fall back to leader motors if follower not available (for camera-only mode)
@@ -526,7 +418,7 @@ def teleoperate(
 
     try:
         if leader is not None:
-            _teleop_loop(
+            teleop_loop(
                 leader=leader,
                 follower=follower,
                 action_queue=action_queue,
@@ -557,111 +449,6 @@ def teleoperate(
 
         if status_thread is not None:
             status_thread.join(timeout=1.0)
-
-
-def _upload_calibration_to_twin(
-    device: Union[SO101Leader, SO101Follower],
-    twin: Twin,
-    robot_type: str,
-) -> None:
-    """
-    Upload calibration data from device to Cyberwave twin.
-
-    Args:
-        device: SO101Leader or SO101Follower instance with calibration
-        twin: Twin instance to upload calibration to
-        robot_type: Robot type ("leader" or "follower")
-    """
-    try:
-        # Get calibration path from device config
-        calibration_path = device.config.calibration_dir / f"{device.config.id}.json"
-
-        if not calibration_path.exists():
-            logger.debug(f"No calibration file found at {calibration_path}, skipping upload")
-            return
-
-        # Load calibration file
-        calib_data = load_calibration(calibration_path)
-
-        # Convert calibration format to backend format
-        # Backend expects: joint_calibration dict with JointCalibration objects
-        # Keys should be motor IDs as strings (e.g., "1", "2", "3") not joint names
-        # Note: drive_mode and id must be strings per the schema
-        joint_calibration = {}
-        for joint_name, calib in calib_data.items():
-            # Get motor ID from device motors mapping
-            if joint_name not in device.motors:
-                logger.warning(f"Joint '{joint_name}' not found in device motors, skipping")
-                continue
-
-            motor_id = device.motors[joint_name].id
-            motor_id_str = str(motor_id)
-
-            joint_calibration[motor_id_str] = {
-                "range_min": calib["range_min"],
-                "range_max": calib["range_max"],
-                "homing_offset": calib["homing_offset"],
-                "drive_mode": str(calib["drive_mode"]),
-                "id": str(calib["id"]),
-            }
-
-        # Upload calibration to twin
-        logger.info(f"Uploading {robot_type} calibration to twin {twin.uuid}...")
-        twin.update_calibration(joint_calibration, robot_type=robot_type)
-        logger.info(f"Calibration uploaded successfully to twin {twin.uuid}")
-    except ImportError:
-        logger.warning(
-            "Cyberwave SDK not installed. Skipping calibration upload. "
-            "Install with: pip install cyberwave"
-        )
-    except Exception as e:
-        logger.warning(f"Failed to upload calibration: {e}")
-        logger.debug("Calibration upload failed, continuing without upload", exc_info=True)
-
-
-def _parse_resolution(resolution_str: str) -> Resolution:
-    """Parse resolution string to Resolution enum.
-
-    Args:
-        resolution_str: Resolution string like "VGA", "HD", "FULL_HD", or "WIDTHxHEIGHT"
-
-    Returns:
-        Resolution enum value
-    """
-    resolution_str = resolution_str.upper().strip()
-
-    # Try to match enum name
-    resolution_map = {
-        "QVGA": Resolution.QVGA,
-        "VGA": Resolution.VGA,
-        "SVGA": Resolution.SVGA,
-        "HD": Resolution.HD,
-        "720P": Resolution.HD,
-        "FULL_HD": Resolution.FULL_HD,
-        "1080P": Resolution.FULL_HD,
-    }
-
-    if resolution_str in resolution_map:
-        return resolution_map[resolution_str]
-
-    # Try to parse WIDTHxHEIGHT format
-    if "x" in resolution_str.lower():
-        try:
-            width, height = resolution_str.lower().split("x")
-            width, height = int(width), int(height)
-            # Try to find matching resolution enum
-            match = Resolution.from_size(width, height)
-            if match:
-                return match
-            # Return closest resolution
-            return Resolution.closest(width, height)
-        except ValueError:
-            pass
-
-    raise ValueError(
-        f"Invalid resolution: {resolution_str}. "
-        "Use QVGA, VGA, SVGA, HD, FULL_HD, or WIDTHxHEIGHT format."
-    )
 
 
 def main():
@@ -775,7 +562,7 @@ def main():
             twin = cyberwave_client.twin(twin_id=uuid)
             wrist_fps = setup_config.get("camera_fps", 30)
             wrist_res = setup_config.get("wrist_camera_resolution", "VGA")
-            wrist_res_enum = _parse_resolution(wrist_res)
+            wrist_res_enum = parse_resolution_to_enum(wrist_res)
             cameras_list.append({
                 "twin": twin,
                 "camera_id": setup_config.get("wrist_camera_id", 0),

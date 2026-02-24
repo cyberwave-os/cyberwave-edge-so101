@@ -1,17 +1,18 @@
-"""Helper functions for cw_remoteoperate script."""
+"""Helper functions for cw_remoteoperate and cw_teleoperate scripts."""
 
 import logging
 import math
 import queue
 import threading
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Union
 
 from cyberwave import Twin
 from motors import MotorNormMode
 
 from scripts.cw_write_position import validate_position
 from so101.follower import SO101Follower
+from so101.leader import SO101Leader
 from utils.trackers import StatusTracker
 from utils.utils import ensure_safe_goal_position, load_calibration, radians_to_normalized
 
@@ -368,13 +369,13 @@ def process_single_joint_update(
 
 
 def upload_calibration_to_twin(
-    follower: SO101Follower,
+    device: Union[SO101Leader, SO101Follower],
     twin: Twin,
     robot_type: str = "follower",
 ) -> None:
-    """Upload calibration data from follower device to Cyberwave twin."""
+    """Upload calibration data from leader or follower device to Cyberwave twin."""
     try:
-        calibration_path = follower.config.calibration_dir / f"{follower.config.id}.json"
+        calibration_path = device.config.calibration_dir / f"{device.config.id}.json"
 
         if not calibration_path.exists():
             logger.debug(f"No calibration file found at {calibration_path}, skipping upload")
@@ -384,11 +385,11 @@ def upload_calibration_to_twin(
 
         joint_calibration = {}
         for joint_name, calib in calib_data.items():
-            if joint_name not in follower.motors:
-                logger.warning(f"Joint '{joint_name}' not found in follower motors, skipping")
+            if joint_name not in device.motors:
+                logger.warning(f"Joint '{joint_name}' not found in device motors, skipping")
                 continue
 
-            motor_id = follower.motors[joint_name].id
+            motor_id = device.motors[joint_name].id
             motor_id_str = str(motor_id)
 
             joint_calibration[motor_id_str] = {
