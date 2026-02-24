@@ -255,7 +255,7 @@ def _motor_writer_worker(
     processed_count = 0
     error_count = 0
     actions_received = 0
-    from utils import ensure_safe_goal_position
+    from utils.utils import ensure_safe_goal_position
 
     while not stop_event.is_set():
         try:

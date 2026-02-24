@@ -208,7 +208,7 @@ class SO101Follower(SO101Robot):
             try:
                 present_pos = self.bus.sync_read("Present_Position", normalize=True)
                 goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in goal_pos.items()}
-                from utils import ensure_safe_goal_position
+                from utils.utils import ensure_safe_goal_position
 
                 goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
             except SerialException as e:
@@ -217,7 +217,7 @@ class SO101Follower(SO101Robot):
                 if self._current_positions:
                     present_pos = {k.removesuffix(".pos"): v for k, v in self._current_positions.items()}
                     goal_present_pos = {key: (g_pos, present_pos.get(key, g_pos)) for key, g_pos in goal_pos.items()}
-                    from utils import ensure_safe_goal_position
+                    from utils.utils import ensure_safe_goal_position
                     goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
 
         # Send goal position to the arm (bus handles normalization automatically)

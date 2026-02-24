@@ -1126,7 +1126,7 @@ class FeetechMotorsBus(MotorsBus):
                     # Check for invalid ranges and add warnings to display
                     warnings_text = ""
                     try:
-                        from utils import validate_calibration_ranges, format_calibration_warnings
+                        from utils.utils import validate_calibration_ranges, format_calibration_warnings
                         # Create temporary dicts with current values (replace inf with actual values for validation)
                         temp_mins = {name: range_mins[name] if range_mins[name] != float("inf") else 0.0 for name in motor_names}
                         temp_maxes = {name: range_maxes[name] if range_maxes[name] != float("-inf") else 4095.0 for name in motor_names}
@@ -1225,7 +1225,7 @@ class FeetechMotorsBus(MotorsBus):
                 and motor_name in self.calibration
             ):
                 # Normalize using calibration
-                from utils import convert_position_with_calibration
+                from utils.utils import convert_position_with_calibration
 
                 motor = self.motors[motor_name]
                 calib = self.calibration[motor_name]
@@ -1286,7 +1286,7 @@ class FeetechMotorsBus(MotorsBus):
             motor = self.motors[motor_name]
             if normalize and self.calibration and motor_name in self.calibration:
                 # Unnormalize using calibration
-                from utils import denormalize_position
+                from utils.utils import denormalize_position
 
                 calib = self.calibration[motor_name]
                 calib_data = {
