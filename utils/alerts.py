@@ -3,12 +3,14 @@
 import logging
 import threading
 import time
-from typing import Any, Dict
+from typing import Dict
+
+from cyberwave import Twin
 
 logger = logging.getLogger(__name__)
 
 # Throttle: minimum seconds between creating the same alert type
-_TEMP_ALERT_THROTTLE = 10.0  # 10 seconds per joint
+_TEMP_ALERT_THROTTLE = 1.0  # 10 seconds per joint
 _MQTT_ALERT_THROTTLE = 300.0  # 5 minutes
 _ERROR_ALERT_THROTTLE = 300.0  # 5 minutes
 
@@ -28,7 +30,7 @@ def _should_create_alert(alert_key: str, throttle_seconds: float) -> bool:
 
 
 def create_temperature_alert(
-    robot: Any,
+    robot: Twin,
     joint_name: str,
     device: str,
     temperature: float,
@@ -74,7 +76,7 @@ def create_temperature_alert(
         return False
 
 
-def create_mqtt_disconnected_alert(robot: Any) -> bool:
+def create_mqtt_disconnected_alert(robot: Twin) -> bool:
     """
     Create an alert when MQTT is disconnected.
 
@@ -104,7 +106,7 @@ def create_mqtt_disconnected_alert(robot: Any) -> bool:
 
 
 def create_calibration_needed_alert(
-    robot: Any,
+    robot: Twin,
     device: str,
     *,
     description: str = "",
@@ -136,7 +138,7 @@ def create_calibration_needed_alert(
 
 
 def create_high_error_rate_alert(
-    robot: Any,
+    robot: Twin,
     error_count: int,
     *,
     threshold: int = 100,
