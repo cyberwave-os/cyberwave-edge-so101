@@ -5,6 +5,11 @@ import threading
 import time
 from typing import Any, Dict, List, Literal, Optional
 
+from utils.alerts import (
+    create_high_error_rate_alert,
+    create_mqtt_disconnected_alert,
+    create_temperature_alert,
+)
 from utils.temperature import read_temperatures
 
 
@@ -154,10 +159,16 @@ def run_status_logging_thread(
     *,
     leader: Optional[Any] = None,
     follower: Optional[Any] = None,
+    robot: Optional[Any] = None,
     mode: Literal["teleoperate", "remoteoperate"] = "teleoperate",
 ) -> None:
     """
     Thread that logs status information at 1 fps.
+
+    When robot (Twin) is provided, creates Cyberwave alerts for:
+    - Motor overheating (>55°C warning, >65°C critical)
+    - MQTT disconnected
+    - High error rate (>100 errors)
 
     Args:
         status_tracker: StatusTracker instance
@@ -166,6 +177,7 @@ def run_status_logging_thread(
         camera_fps: Frames per second for camera streaming
         leader: Optional SO101Leader instance for reading temperatures (teleoperate only)
         follower: Optional SO101Follower instance for reading temperatures
+        robot: Optional Twin instance for creating alerts
         mode: "teleoperate" (Prod/Filt stats, L+F temps) or "remoteoperate" (Recv/Proc/Filt, F temps)
     """
     status_tracker.fps = fps
@@ -186,6 +198,35 @@ def run_status_logging_thread(
                 status_tracker.update_joint_temperatures(temperatures)
 
             status = status_tracker.get_status()
+
+            # Create Cyberwave alerts when robot twin is provided
+            if robot is not None:
+                joint_temps = status.get("joint_temperatures", {})
+                for key, temp in joint_temps.items():
+                    if temp is None or temp < 55:
+                        continue
+                    if key.startswith("leader_"):
+                        joint_index = key.replace("leader_", "")
+                        joint_name = status_tracker.joint_index_to_name.get(
+                            joint_index, joint_index
+                        )
+                        create_temperature_alert(
+                            robot, joint_name, "leader", temp
+                        )
+                    elif key.startswith("follower_"):
+                        joint_index = key.replace("follower_", "")
+                        joint_name = status_tracker.joint_index_to_name.get(
+                            joint_index, joint_index
+                        )
+                        create_temperature_alert(
+                            robot, joint_name, "follower", temp
+                        )
+                if not status.get("mqtt_connected", True):
+                    create_mqtt_disconnected_alert(robot)
+                if status.get("errors", 0) >= 100:
+                    create_high_error_rate_alert(
+                        robot, status["errors"], threshold=100
+                    )
 
             lines = []
             lines.append("=" * 70)

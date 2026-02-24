@@ -7,7 +7,6 @@ import time
 from typing import Any, Dict, Optional
 
 from cyberwave import Twin
-from cyberwave.utils import TimeReference
 
 from motors import MotorNormMode
 

@@ -40,6 +40,7 @@ from motors import MotorNormMode
 from scripts.cw_setup import load_setup_config
 from so101.follower import SO101Follower
 from so101.leader import SO101Leader
+from utils.alerts import create_calibration_needed_alert
 from utils.config import get_setup_config_path
 from utils.cw_update_worker import cyberwave_update_worker, process_cyberwave_updates
 from utils.trackers import StatusTracker, run_status_logging_thread
@@ -287,6 +288,12 @@ def teleoperate(
     # Get calibration data from leader (leader handles its own calibration loading)
     if leader is not None:
         if leader.calibration is None:
+            if robot is not None:
+                create_calibration_needed_alert(
+                    robot,
+                    "leader",
+                    description="Please calibrate the leader using the calibration script.",
+                )
             raise RuntimeError(
                 "Leader is not calibrated. Please calibrate the leader first using the calibration script."
             )
@@ -366,7 +373,12 @@ def teleoperate(
     status_thread = threading.Thread(
         target=run_status_logging_thread,
         args=(status_tracker, stop_event, CONTROL_RATE_HZ, camera_fps),
-        kwargs={"leader": leader, "follower": follower, "mode": "teleoperate"},
+        kwargs={
+            "leader": leader,
+            "follower": follower,
+            "robot": robot,
+            "mode": "teleoperate",
+        },
         daemon=True,
     )
     status_thread.start()

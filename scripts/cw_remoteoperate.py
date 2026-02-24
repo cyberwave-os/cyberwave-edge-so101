@@ -864,7 +864,11 @@ def remoteoperate(
     status_thread = threading.Thread(
         target=run_status_logging_thread,
         args=(status_tracker, stop_event, CONTROL_RATE_HZ, camera_fps),
-        kwargs={"follower": follower, "mode": "remoteoperate"},
+        kwargs={
+            "follower": follower,
+            "robot": robot,
+            "mode": "remoteoperate",
+        },
         daemon=True,
     )
     status_thread.start()
