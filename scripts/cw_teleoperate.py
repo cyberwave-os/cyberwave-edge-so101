@@ -393,7 +393,6 @@ def teleoperate(
                 joint_name_to_norm_mode,
                 stop_event,
                 robot,
-                time_reference,
                 status_tracker,
                 follower_calibration,
                 motor_id_to_schema_joint,

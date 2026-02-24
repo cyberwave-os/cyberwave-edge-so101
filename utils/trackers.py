@@ -205,7 +205,7 @@ def run_status_logging_thread(
                 camera_states = status.get("camera_states", {})
                 for info in camera_infos:
                     cam_name = info.get("name", "default")
-                    cam_uuid = info.get("uuid", "")[:8]
+                    cam_uuid = info.get("uuid", "")
                     state = camera_states.get(cam_name, {})
                     detected = state.get("detected", False)
                     started = state.get("started", False)
