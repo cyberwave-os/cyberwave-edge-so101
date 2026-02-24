@@ -28,7 +28,7 @@ SO101_MOTORS = {
 }
 
 SO101_MOTOR_NAMES = list(SO101_MOTORS.keys())
-SO101_MOTOR_IDS = list(SO101_MOTORS.values().id)
+SO101_MOTOR_IDS = [m.id for m in SO101_MOTORS.values()]
 SO101_MOTOR_TO_JOINT_NAME = {key: value.id for key, value in SO101_MOTORS.items()}
 
 class SO101Robot(abc.ABC):
