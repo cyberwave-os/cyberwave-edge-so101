@@ -8,7 +8,7 @@ from typing import Any, Dict
 logger = logging.getLogger(__name__)
 
 # Throttle: minimum seconds between creating the same alert type
-_TEMP_ALERT_THROTTLE = 300.0  # 5 minutes per joint
+_TEMP_ALERT_THROTTLE = 10.0  # 10 seconds per joint
 _MQTT_ALERT_THROTTLE = 300.0  # 5 minutes
 _ERROR_ALERT_THROTTLE = 300.0  # 5 minutes
 
