@@ -80,9 +80,7 @@ def joint_position_heartbeat_thread(
                     else:
                         radians = normalized_pos * math.pi / 180.0
 
-                schema_joint = motor_id_to_schema_joint.get(
-                    joint_index, f"_{joint_index}"
-                )
+                schema_joint = motor_id_to_schema_joint.get(joint_index, f"_{joint_index}")
                 joint_positions[schema_joint] = radians
 
             if joint_positions:
@@ -210,6 +208,7 @@ def create_joint_state_callback(
     status_tracker: Optional[StatusTracker] = None,
 ) -> Callable[[str, Dict], None]:
     """Create a callback function for MQTT joint state updates."""
+
     def callback(topic: str, data: Dict) -> None:
         if status_tracker:
             status_tracker.increment_received()
@@ -220,10 +219,20 @@ def create_joint_state_callback(
                     status_tracker.increment_filtered()
                 return
 
+            source_type = data.get("source_type")
+            if source_type != "tele":
+                return
+
             if "joint_name" in data and "joint_state" in data:
                 process_single_joint_update(
-                    data, current_state, action_queue, joint_index_to_name,
-                    joint_name_to_norm_mode, follower, follower_calibration, status_tracker,
+                    data,
+                    current_state,
+                    action_queue,
+                    joint_index_to_name,
+                    joint_name_to_norm_mode,
+                    follower,
+                    follower_calibration,
+                    status_tracker,
                 )
                 return
 
