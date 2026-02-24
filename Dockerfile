@@ -20,6 +20,9 @@ COPY MANIFEST.in .
 # Install the package and its dependencies
 RUN pip install --no-cache-dir -e .
 
+# Pre-create the directory that edge-core bind-mounts with the edge config
+RUN mkdir -p /app/.cyberwave
+
 # Copy entrypoint script that loads CYBERWAVE_TWIN_JSON_FILE into env vars
 COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh
