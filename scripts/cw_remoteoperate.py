@@ -1,9 +1,7 @@
 """Remote operation loop for SO101 follower via Cyberwave MQTT."""
 
-import argparse
 import logging
 import math
-import os
 import queue
 import sys
 import threading
@@ -32,6 +30,7 @@ from utils.config import get_setup_config_path
 from utils.cw_alerts import create_calibration_needed_alert
 from utils.cw_remoteoperate_helpers import (
     create_joint_state_callback,
+    get_remoteoperate_parser,
     joint_position_heartbeat_thread,
     motor_writer_worker,
     upload_calibration_to_twin,
@@ -461,36 +460,9 @@ def remoteoperate(
 
 def main():
     """Main entry point for remote operation script."""
-    # Load environment variables from .env file
     load_dotenv()
 
-    parser = argparse.ArgumentParser(
-        description="Remote operate SO101 follower via Cyberwave MQTT"
-    )
-    parser.add_argument(
-        "--twin-uuid",
-        type=str,
-        default=os.getenv("CYBERWAVE_TWIN_UUID"),
-        help="SO101 twin UUID (override from setup.json)",
-    )
-    parser.add_argument(
-        "--follower-port",
-        type=str,
-        default=os.getenv("CYBERWAVE_METADATA_FOLLOWER_PORT"),
-        help="Follower serial port (override from setup.json)",
-    )
-    parser.add_argument(
-        "--list-realsense",
-        action="store_true",
-        help="List available RealSense devices and exit",
-    )
-    parser.add_argument(
-        "--setup-path",
-        type=str,
-        default=None,
-        help="Path to setup.json (default: ~/.cyberwave/so101_lib/setup.json)",
-    )
-
+    parser = get_remoteoperate_parser()
     args = parser.parse_args()
 
     # Handle --list-realsense

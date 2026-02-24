@@ -1,10 +1,12 @@
 """Helper functions for cw_teleoperate script."""
 
+import argparse
 import logging
+import os
 import queue
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 from cyberwave.utils import TimeReference
 
@@ -16,6 +18,43 @@ from utils.trackers import StatusTracker
 logger = logging.getLogger(__name__)
 
 CONTROL_RATE_HZ = 100
+
+
+def get_teleoperate_parser() -> argparse.ArgumentParser:
+    """Create argument parser for cw_teleoperate script."""
+    parser = argparse.ArgumentParser(
+        description="Teleoperate SO101 leader and update Cyberwave twin"
+    )
+    parser.add_argument(
+        "--twin-uuid",
+        type=str,
+        default=os.getenv("CYBERWAVE_TWIN_UUID"),
+        help="SO101 twin UUID (override from setup.json)",
+    )
+    parser.add_argument(
+        "--leader-port",
+        type=str,
+        default=os.getenv("CYBERWAVE_METADATA_LEADER_PORT"),
+        help="Leader serial port (override from setup.json)",
+    )
+    parser.add_argument(
+        "--follower-port",
+        type=str,
+        default=os.getenv("CYBERWAVE_METADATA_FOLLOWER_PORT"),
+        help="Follower serial port (override from setup.json)",
+    )
+    parser.add_argument(
+        "--list-realsense",
+        action="store_true",
+        help="List available RealSense devices and exit",
+    )
+    parser.add_argument(
+        "--setup-path",
+        type=str,
+        default=None,
+        help="Path to setup.json (default: ~/.cyberwave/so101_lib/setup.json)",
+    )
+    return parser
 
 
 def teleop_loop(

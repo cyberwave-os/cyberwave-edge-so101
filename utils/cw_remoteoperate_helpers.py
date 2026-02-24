@@ -1,15 +1,17 @@
 """Helper functions for cw_remoteoperate and cw_teleoperate scripts."""
 
+import argparse
 import logging
 import math
+import os
 import queue
 import threading
 import time
 from typing import Any, Callable, Dict, Optional, Union
 
 from cyberwave import Twin
-from motors import MotorNormMode
 
+from motors import MotorNormMode
 from scripts.cw_write_position import validate_position
 from so101.follower import SO101Follower
 from so101.leader import SO101Leader
@@ -17,6 +19,37 @@ from utils.trackers import StatusTracker
 from utils.utils import ensure_safe_goal_position, load_calibration, radians_to_normalized
 
 logger = logging.getLogger(__name__)
+
+
+def get_remoteoperate_parser() -> argparse.ArgumentParser:
+    """Create argument parser for cw_remoteoperate script."""
+    parser = argparse.ArgumentParser(
+        description="Remote operate SO101 follower via Cyberwave MQTT"
+    )
+    parser.add_argument(
+        "--twin-uuid",
+        type=str,
+        default=os.getenv("CYBERWAVE_TWIN_UUID"),
+        help="SO101 twin UUID (override from setup.json)",
+    )
+    parser.add_argument(
+        "--follower-port",
+        type=str,
+        default=os.getenv("CYBERWAVE_METADATA_FOLLOWER_PORT"),
+        help="Follower serial port (override from setup.json)",
+    )
+    parser.add_argument(
+        "--list-realsense",
+        action="store_true",
+        help="List available RealSense devices and exit",
+    )
+    parser.add_argument(
+        "--setup-path",
+        type=str,
+        default=None,
+        help="Path to setup.json (default: ~/.cyberwave/so101_lib/setup.json)",
+    )
+    return parser
 
 
 def joint_position_heartbeat_thread(
