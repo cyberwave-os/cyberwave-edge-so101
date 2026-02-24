@@ -33,7 +33,7 @@ def create_temperature_alert(
     device: str,
     temperature: float,
     *,
-    warning_threshold: float = 42.0,
+    warning_threshold: float = 22.0,
     critical_threshold: float = 50.0,
 ) -> bool:
     """
