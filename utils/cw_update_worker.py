@@ -9,7 +9,6 @@ from typing import Any, Dict, Optional
 from cyberwave import Twin
 
 from motors import MotorNormMode
-
 from utils.trackers import StatusTracker
 
 
@@ -70,24 +69,42 @@ def cyberwave_update_worker(
                     normalized_position = action_data.get("position", 0.0)
                     timestamp = action_data.get("timestamp")
 
-                    calib = follower_calibration[joint_name]
-                    r_min = calib.range_min
-                    r_max = calib.range_max
-                    delta_r = (r_max - r_min) / 2.0
-
                     norm_mode = joint_name_to_norm_mode.get(
                         joint_name, MotorNormMode.RANGE_M100_100
                     )
 
-                    match norm_mode:
-                        case MotorNormMode.RANGE_M100_100:
+                    calib = (
+                        follower_calibration.get(joint_name)
+                        if follower_calibration
+                        else None
+                    )
+                    if calib is not None:
+                        r_min = calib.range_min
+                        r_max = calib.range_max
+                        delta_r = (r_max - r_min) / 2.0
+
+                        if norm_mode == MotorNormMode.RANGE_M100_100:
                             raw_offset = (normalized_position / 100.0) * delta_r
                             position = raw_offset * (2.0 * math.pi / 4095.0)
-                        case MotorNormMode.RANGE_0_100:
+                        elif norm_mode == MotorNormMode.RANGE_0_100:
                             delta_r = r_max - r_min
-                            raw_value = r_min + (normalized_position / 100.0) * delta_r
-                            position = (raw_value - r_min) * (2.0 * math.pi / 4095.0)
-                        case _:
+                            raw_value = r_min + (
+                                normalized_position / 100.0
+                            ) * delta_r
+                            position = (raw_value - r_min) * (
+                                2.0 * math.pi / 4095.0
+                            )
+                        else:
+                            position = normalized_position * math.pi / 180.0
+                    else:
+                        # Fallback without calibration (same as remoteoperate)
+                        if norm_mode == MotorNormMode.RANGE_M100_100:
+                            degrees = (normalized_position / 100.0) * 180.0
+                            position = degrees * math.pi / 180.0
+                        elif norm_mode == MotorNormMode.RANGE_0_100:
+                            degrees = (normalized_position / 100.0) * 360.0
+                            position = degrees * math.pi / 180.0
+                        else:
                             position = normalized_position * math.pi / 180.0
 
                     batch_updates[joint_index] = (position, 0.0, 0.0, timestamp)

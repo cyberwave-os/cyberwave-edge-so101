@@ -23,9 +23,7 @@ logger = logging.getLogger(__name__)
 
 def get_remoteoperate_parser() -> argparse.ArgumentParser:
     """Create argument parser for cw_remoteoperate script."""
-    parser = argparse.ArgumentParser(
-        description="Remote operate SO101 follower via Cyberwave MQTT"
-    )
+    parser = argparse.ArgumentParser(description="Remote operate SO101 follower via Cyberwave MQTT")
     parser.add_argument(
         "--twin-uuid",
         type=str,
@@ -239,6 +237,7 @@ def create_joint_state_callback(
     follower: SO101Follower,
     follower_calibration: Optional[Dict[str, Any]] = None,
     status_tracker: Optional[StatusTracker] = None,
+    schema_joint_to_motor_id: Optional[Dict[str, int]] = None,
 ) -> Callable[[str, Dict], None]:
     """Create a callback function for MQTT joint state updates."""
 
@@ -266,6 +265,7 @@ def create_joint_state_callback(
                     follower,
                     follower_calibration,
                     status_tracker,
+                    schema_joint_to_motor_id=schema_joint_to_motor_id,
                 )
                 return
 
@@ -275,8 +275,15 @@ def create_joint_state_callback(
             for joint_name, position_val in data.items():
                 if joint_name in ("source_type", "timestamp", "session_id", "type"):
                     continue
-                if joint_name not in follower.motors:
+                # Resolve schema joint names (e.g. "_1") to SO101 joint names
+                resolved_name = joint_name
+                if joint_name not in follower.motors and schema_joint_to_motor_id:
+                    motor_id = schema_joint_to_motor_id.get(joint_name)
+                    if motor_id is not None:
+                        resolved_name = joint_index_to_name.get(motor_id)
+                if resolved_name is None or resolved_name not in follower.motors:
                     continue
+                joint_name = resolved_name
                 try:
                     position_radians = float(position_val)
                 except (ValueError, TypeError):
@@ -360,6 +367,7 @@ def process_single_joint_update(
     follower: SO101Follower,
     follower_calibration: Optional[Dict[str, Any]],
     status_tracker: Optional[StatusTracker],
+    schema_joint_to_motor_id: Optional[Dict[str, int]] = None,
 ) -> None:
     """Process single-joint format: joint_name + joint_state."""
     joint_name_str = data.get("joint_name")
@@ -375,10 +383,13 @@ def process_single_joint_update(
     try:
         joint_index = int(joint_name_str)
     except (ValueError, TypeError):
-        for idx, name in joint_index_to_name.items():
-            if name == joint_name_str:
-                joint_index = idx
-                break
+        if schema_joint_to_motor_id and joint_name_str in schema_joint_to_motor_id:
+            joint_index = schema_joint_to_motor_id[joint_name_str]
+        else:
+            for idx, name in joint_index_to_name.items():
+                if name == joint_name_str:
+                    joint_index = idx
+                    break
         if joint_index is None:
             if status_tracker:
                 status_tracker.increment_errors()

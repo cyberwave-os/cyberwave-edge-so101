@@ -2,14 +2,16 @@
 
 import argparse
 import logging
+import math
 import os
 import queue
 import threading
 import time
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from cyberwave.utils import TimeReference
 
+from motors import MotorNormMode
 from so101.follower import SO101Follower
 from so101.leader import SO101Leader
 from utils.cw_update_worker import process_cyberwave_updates
@@ -126,3 +128,64 @@ def teleop_loop(
         raise
 
     return total_update_count, total_skip_count
+
+
+def publish_initial_follower_observation(
+    follower: SO101Follower,
+    robot: Any,
+    mqtt_client: Any,
+    follower_calibration: Optional[Dict[str, Any]],
+    joint_name_to_norm_mode: Dict[str, MotorNormMode],
+    motor_id_to_schema_joint: Dict[int, str],
+    fps: int = 100,
+) -> None:
+    """
+    Convert follower observation to schema joint format and publish to Cyberwave.
+
+    Uses calibration to convert normalized positions to radians, and motor_id_to_schema_joint
+    to map SO101 joints to twin schema names (e.g. "_1", "_2").
+    """
+    follower_obs = follower.get_observation()
+    observations = {}
+    for joint_key, normalized_pos in follower_obs.items():
+        name = joint_key.removesuffix(".pos")
+        if name not in follower.motors:
+            continue
+        joint_index = follower.motors[name].id
+        norm_mode = joint_name_to_norm_mode.get(name, MotorNormMode.RANGE_M100_100)
+
+        if follower_calibration and name in follower_calibration:
+            calib = follower_calibration[name]
+            r_min = calib.range_min
+            r_max = calib.range_max
+            delta_r = (r_max - r_min) / 2.0
+
+            if norm_mode == MotorNormMode.RANGE_M100_100:
+                raw_offset = (normalized_pos / 100.0) * delta_r
+                radians = raw_offset * (2.0 * math.pi / 4095.0)
+            elif norm_mode == MotorNormMode.RANGE_0_100:
+                center_normalized = 50.0
+                offset_normalized = normalized_pos - center_normalized
+                raw_offset = (offset_normalized / 100.0) * delta_r
+                radians = raw_offset * (2.0 * math.pi / 4095.0)
+            else:
+                radians = normalized_pos * math.pi / 180.0
+        else:
+            # Fallback without calibration (same as remoteoperate)
+            if norm_mode == MotorNormMode.RANGE_M100_100:
+                degrees = (normalized_pos / 100.0) * 180.0
+                radians = degrees * math.pi / 180.0
+            elif norm_mode == MotorNormMode.RANGE_0_100:
+                degrees = (normalized_pos / 100.0) * 360.0
+                radians = degrees * math.pi / 180.0
+            else:
+                radians = normalized_pos * math.pi / 180.0
+
+        schema_joint = motor_id_to_schema_joint.get(joint_index, f"_{joint_index}")
+        observations[schema_joint] = radians
+
+    mqtt_client.publish_initial_observation(
+        twin_uuid=robot.uuid,
+        observations=observations,
+        fps=fps,
+    )

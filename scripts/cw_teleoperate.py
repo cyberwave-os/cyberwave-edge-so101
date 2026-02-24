@@ -1,7 +1,6 @@
 """Teleoperation loop for SO101 leader and follower."""
 
 import logging
-import math
 import queue
 import sys
 import threading
@@ -23,15 +22,18 @@ except ImportError:
     RealSenseConfig = None
     RealSenseDiscovery = None
 
-from motors import MotorNormMode
 from scripts.cw_setup import load_setup_config
 from so101.follower import SO101Follower
 from so101.leader import SO101Leader
 from utils.config import get_setup_config_path
 from utils.cw_alerts import create_calibration_needed_alert
 from utils.cw_remoteoperate_helpers import upload_calibration_to_twin
-from utils.cw_teleoperate_helpers import get_teleoperate_parser
+from utils.cw_teleoperate_helpers import (
+    get_teleoperate_parser,
+    publish_initial_follower_observation,
+)
 from utils.cw_update_worker import cyberwave_update_worker, process_cyberwave_updates
+from utils.cw_utils import build_joint_mappings, resolve_calibration_for_edge
 from utils.keyboard import keyboard_input_thread
 from utils.trackers import StatusTracker, run_status_logging_thread
 from utils.utils import parse_resolution_to_enum
@@ -110,6 +112,7 @@ def teleop_loop(
         raise
 
     return total_update_count, total_skip_count
+
 
 def teleoperate(
     leader: Optional[SO101Leader],
@@ -233,15 +236,12 @@ def teleoperate(
         if robot is not None:
             upload_calibration_to_twin(leader, robot, "leader")
 
-    # Require follower calibration when sending to Cyberwave (robot twin)
+    # Alert when follower is not calibrated (can still run with fallback conversion)
     if follower is not None and robot is not None and follower.calibration is None:
         create_calibration_needed_alert(
             robot,
             "follower",
-            description="Please calibrate the follower using the calibration script.",
-        )
-        raise RuntimeError(
-            "Follower is not calibrated. Please calibrate the follower first using the calibration script."
+            description="Please calibrate the follower using the calibration script for accurate positioning.",
         )
 
     # Upload follower calibration to twin if available
@@ -254,46 +254,43 @@ def teleoperate(
         follower.motors if follower is not None else (leader.motors if leader is not None else {})
     )
 
-    # Build motor_id -> schema joint name mapping from twin's universal schema
-    # Schema uses names like "_1", "_2" (SO101); matches backend get_controllable_joints
+    # Resolve calibration: prefer local device, fallback to twin API (same as remoteoperate)
+    follower_calibration = None
+    if robot is not None:
+        follower_calibration = resolve_calibration_for_edge(
+            robot,
+            follower.calibration if follower is not None else None,
+            "follower",
+        )
+
+    # Build joint mappings from twin schema and SO101 motors (same as remoteoperate)
     motor_id_to_schema_joint: Dict[int, str] = {}
+    joint_name_to_index: Dict[str, int] = {}
+    joint_name_to_norm_mode: Dict[str, Any] = {}
+    joint_index_to_name: Dict[int, str] = {}
     if robot is not None and motors_for_mapping:
-        try:
-            schema_joint_names = robot.get_controllable_joint_names()
-            for _, motor in motors_for_mapping.items():
-                motor_id = motor.id
-                idx = motor_id - 1  # 0-based index
-                if idx < len(schema_joint_names):
-                    motor_id_to_schema_joint[motor_id] = schema_joint_names[idx]
-                else:
-                    motor_id_to_schema_joint[motor_id] = f"_{motor_id}"  # fallback
-        except Exception:
-            # Fallback to _n naming if schema fetch fails
-            motor_id_to_schema_joint = {
-                motor.id: f"_{motor.id}" for _, motor in motors_for_mapping.items()
-            }
-
-    if motors_for_mapping:
-        # Create mapping from joint names to joint indexes (motor IDs: 1-6)
-        joint_name_to_index = {name: motor.id for name, motor in motors_for_mapping.items()}
-
-        # Create mapping from joint indexes to joint names (for status display)
-        joint_index_to_name = {str(motor.id): name for name, motor in motors_for_mapping.items()}
-        status_tracker.set_joint_index_to_name(joint_index_to_name)
-
-        # Create mapping from joint names to normalization modes
+        mappings = build_joint_mappings(robot, motors_for_mapping)
+        motor_id_to_schema_joint = mappings["motor_id_to_schema_joint"]
+        joint_index_to_name = mappings["joint_index_to_name"]
+        joint_name_to_norm_mode = mappings["joint_name_to_norm_mode"]
+        joint_name_to_index = {name: mid for mid, name in joint_index_to_name.items()}
+    elif motors_for_mapping:
+        # No robot: build from motors only (e.g. camera-only with leader)
+        joint_index_to_name = {motor.id: name for name, motor in motors_for_mapping.items()}
         joint_name_to_norm_mode = {
             name: motor.norm_mode for name, motor in motors_for_mapping.items()
         }
+        joint_name_to_index = {name: motor.id for name, motor in motors_for_mapping.items()}
+
+    if motors_for_mapping:
+        joint_index_to_name_str = {str(mid): name for mid, name in joint_index_to_name.items()}
+        status_tracker.set_joint_index_to_name(joint_index_to_name_str)
 
         # Initialize last observation state (track normalized positions)
-        # Follower returns normalized positions, worker thread handles conversion to degrees/radians
         last_observation: Dict[str, float] = {}
         for joint_name in motors_for_mapping.keys():
             last_observation[joint_name] = float("inf")  # Use inf to force first update
     else:
-        joint_name_to_index = {}
-        joint_name_to_norm_mode = {}
         last_observation: Dict[str, float] = {}
 
     # Create queue and worker thread for Cyberwave updates
@@ -325,17 +322,6 @@ def teleoperate(
         daemon=True,
     )
     status_thread.start()
-
-    # Get follower calibration for proper conversion to radians
-    follower_calibration = None
-    if follower is not None and follower.calibration is not None:
-        follower_calibration = follower.calibration
-        assert follower_calibration.keys() == follower.motors.keys()
-        for joint_name, calibration in follower_calibration.items():
-            assert joint_name in follower.motors
-            assert calibration.range_min is not None
-            assert calibration.range_max is not None
-            assert calibration.range_min < calibration.range_max
 
     # Start MQTT update worker thread
     worker_thread = None
@@ -372,9 +358,7 @@ def teleoperate(
                 twin = item
                 overrides = {}
             if "camera_id" not in overrides:
-                overrides["camera_id"] = (
-                    follower_cameras[idx] if idx < len(follower_cameras) else 0
-                )
+                overrides["camera_id"] = follower_cameras[idx] if idx < len(follower_cameras) else 0
             overrides.setdefault("fps", camera_fps)
             enriched_twins.append((twin, overrides))
 
@@ -399,9 +383,8 @@ def teleoperate(
         def command_callback(status: str, msg: str, camera_name: str = "default"):
             if status_tracker:
                 msg_lower = msg.lower()
-                if (
-                    "started" in msg_lower
-                    or (status == "ok" and ("streaming" in msg_lower or "running" in msg_lower))
+                if "started" in msg_lower or (
+                    status == "ok" and ("streaming" in msg_lower or "running" in msg_lower)
                 ):
                     status_tracker.update_webrtc_state(camera_name, "streaming")
                     status_tracker.update_camera_status(camera_name, detected=True, started=True)
@@ -439,49 +422,15 @@ def teleoperate(
             and mqtt_client is not None
             and time_reference is not None
         ):
-            # Get follower observation (this is what we send to Cyberwave)
-            follower_obs = follower.get_observation()
-            observations = {}
-            for joint_key, normalized_pos in follower_obs.items():
-                # Remove .pos suffix if present
-                name = joint_key.removesuffix(".pos")
-                if name in follower.motors:
-                    joint_index = follower.motors[name].id
-                    # Convert normalized position to radians using calibration
-                    if follower_calibration and name in follower_calibration:
-                        calib = follower_calibration[name]
-                        r_min = calib.range_min
-                        r_max = calib.range_max
-                        delta_r = (r_max - r_min) / 2.0
-
-                        norm_mode = joint_name_to_norm_mode[name]
-                        if norm_mode == MotorNormMode.RANGE_M100_100:
-                            # Normalized is in [-100, 100], convert to radians
-                            raw_offset = (normalized_pos / 100.0) * delta_r
-                            radians = raw_offset * (2.0 * math.pi / 4095.0)
-                        elif norm_mode == MotorNormMode.RANGE_0_100:
-                            # Normalized is in [0, 100], center at 50
-                            center_normalized = 50.0
-                            offset_normalized = normalized_pos - center_normalized
-                            raw_offset = (offset_normalized / 100.0) * delta_r
-                            radians = raw_offset * (2.0 * math.pi / 4095.0)
-                        else:  # DEGREES
-                            radians = normalized_pos * math.pi / 180.0
-                    else:
-                        raise Exception(f"No calibration found for joint: {name}")
-                    # Use schema joint name (e.g. "_1", "_2") for MQTT
-                    schema_joint = motor_id_to_schema_joint.get(
-                        joint_index, f"_{joint_index}"
-                    )
-                    observations[schema_joint] = radians
-            # Send follower observations to Cyberwave as single update
-            # together with the desired actual frequency
-            mqtt_client.publish_initial_observation(
-                twin_uuid=robot.uuid,
-                observations=observations,
+            publish_initial_follower_observation(
+                follower=follower,
+                robot=robot,
+                mqtt_client=mqtt_client,
+                follower_calibration=follower_calibration,
+                joint_name_to_norm_mode=joint_name_to_norm_mode,
+                motor_id_to_schema_joint=motor_id_to_schema_joint,
                 fps=CONTROL_RATE_HZ,
             )
-
     except Exception:
         if status_tracker:
             status_tracker.increment_errors()
@@ -577,9 +526,9 @@ def main():
 
     # Validate: camera-only requires setup with cameras
     if camera_only:
-        has_setup_cameras = setup_config.get("wrist_camera") or len(
-            setup_config.get("additional_cameras", [])
-        ) > 0
+        has_setup_cameras = (
+            setup_config.get("wrist_camera") or len(setup_config.get("additional_cameras", [])) > 0
+        )
         if not has_setup_cameras:
             print(
                 "Error: camera_only in setup requires wrist_camera or additional_cameras. "
@@ -600,20 +549,22 @@ def main():
             wrist_fps = setup_config.get("camera_fps", 30)
             wrist_res = setup_config.get("wrist_camera_resolution", "VGA")
             wrist_res_enum = parse_resolution_to_enum(wrist_res)
-            cameras_list.append({
-                "twin": twin,
-                "camera_id": setup_config.get("wrist_camera_id", 0),
-                "camera_type": "cv2",
-                "camera_resolution": wrist_res_enum,
-                "camera_name": setup_config.get("wrist_camera_name", "wrist_camera"),
-                "fps": wrist_fps,
-                "fourcc": setup_config.get("wrist_camera_fourcc"),
-                "keyframe_interval": setup_config.get("wrist_camera_keyframe_interval"),
-                "enable_depth": False,
-                "depth_fps": 30,
-                "depth_resolution": None,
-                "depth_publish_interval": 30,
-            })
+            cameras_list.append(
+                {
+                    "twin": twin,
+                    "camera_id": setup_config.get("wrist_camera_id", 0),
+                    "camera_type": "cv2",
+                    "camera_resolution": wrist_res_enum,
+                    "camera_name": setup_config.get("wrist_camera_name", "wrist_camera"),
+                    "fps": wrist_fps,
+                    "fourcc": setup_config.get("wrist_camera_fourcc"),
+                    "keyframe_interval": setup_config.get("wrist_camera_keyframe_interval"),
+                    "enable_depth": False,
+                    "depth_fps": 30,
+                    "depth_resolution": None,
+                    "depth_publish_interval": 30,
+                }
+            )
 
         for add in setup_config.get("additional_cameras", []):
             uuid = add.get("twin_uuid")
@@ -628,24 +579,30 @@ def main():
             depth_res = add.get("depth_resolution")
             depth_res_enum = None
             if depth_res and len(depth_res) >= 2:
-                depth_res_enum = Resolution.from_size(depth_res[0], depth_res[1]) or Resolution.closest(depth_res[0], depth_res[1])
-            cameras_list.append({
-                "twin": twin,
-                "camera_id": add.get("camera_id", 1),
-                "camera_type": add.get("camera_type", "cv2"),
-                "camera_resolution": cam_res,
-                "camera_name": add.get("camera_name", "external"),
-                "fps": add.get("fps", 30),
-                "fourcc": add.get("fourcc"),
-                "enable_depth": add.get("enable_depth", False),
-                "depth_fps": add.get("depth_fps", 30),
-                "depth_resolution": depth_res_enum,
-                "depth_publish_interval": add.get("depth_publish_interval", 30),
-            })
+                depth_res_enum = Resolution.from_size(
+                    depth_res[0], depth_res[1]
+                ) or Resolution.closest(depth_res[0], depth_res[1])
+            cameras_list.append(
+                {
+                    "twin": twin,
+                    "camera_id": add.get("camera_id", 1),
+                    "camera_type": add.get("camera_type", "cv2"),
+                    "camera_resolution": cam_res,
+                    "camera_name": add.get("camera_name", "external"),
+                    "fps": add.get("fps", 30),
+                    "fourcc": add.get("fourcc"),
+                    "enable_depth": add.get("enable_depth", False),
+                    "depth_fps": add.get("depth_fps", 30),
+                    "depth_resolution": depth_res_enum,
+                    "depth_publish_interval": add.get("depth_publish_interval", 30),
+                }
+            )
 
     # Resolve twin UUID and ports: CLI/env > setup.json (so teleoperate works with no args when setup exists)
-    effective_twin_uuid = args.twin_uuid or setup_config.get("twin_uuid") or setup_config.get(
-        "wrist_camera_twin_uuid"
+    effective_twin_uuid = (
+        args.twin_uuid
+        or setup_config.get("twin_uuid")
+        or setup_config.get("wrist_camera_twin_uuid")
     )
     effective_leader_port = args.leader_port or setup_config.get("leader_port")
     effective_follower_port = args.follower_port or setup_config.get("follower_port")

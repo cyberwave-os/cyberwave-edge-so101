@@ -35,6 +35,7 @@ from utils.cw_remoteoperate_helpers import (
     motor_writer_worker,
     upload_calibration_to_twin,
 )
+from utils.cw_utils import build_joint_mappings, resolve_calibration_for_edge
 from utils.keyboard import keyboard_input_thread
 from utils.trackers import StatusTracker, run_status_logging_thread
 from utils.utils import parse_resolution_to_enum
@@ -127,42 +128,22 @@ def remoteoperate(
     if follower.calibration is not None:
         upload_calibration_to_twin(follower, robot, "follower")
 
-    # Get follower calibration for proper conversion to/from radians
-    follower_calibration = None
-    if follower is not None and follower.calibration is not None:
-        follower_calibration = follower.calibration
-        assert follower_calibration.keys() == follower.motors.keys()
-        for joint_name, calibration in follower_calibration.items():
-            assert joint_name in follower.motors
-            assert calibration.range_min is not None
-            assert calibration.range_max is not None
-            assert calibration.range_min < calibration.range_max
+    # Resolve calibration: prefer local device, fallback to twin API
+    follower_calibration = resolve_calibration_for_edge(
+        robot,
+        follower.calibration if follower is not None else None,
+        "follower",
+    )
 
-    # Create mapping from joint index (motor ID) to joint name
-    joint_index_to_name = {motor.id: name for name, motor in follower.motors.items()}
+    # Build joint mappings from twin schema and SO101 motors
+    mappings = build_joint_mappings(robot, follower.motors if follower else None)
+    joint_index_to_name = mappings["joint_index_to_name"]
+    joint_name_to_norm_mode = mappings["joint_name_to_norm_mode"]
+    motor_id_to_schema_joint = mappings["motor_id_to_schema_joint"]
+    schema_joint_to_motor_id = mappings["schema_joint_to_motor_id"]
 
-    # Create mapping from joint indexes to joint names (for status display, string keys)
     joint_index_to_name_str = {str(motor.id): name for name, motor in follower.motors.items()}
     status_tracker.set_joint_index_to_name(joint_index_to_name_str)
-
-    # Create mapping from joint names to normalization modes
-    joint_name_to_norm_mode = {name: motor.norm_mode for name, motor in follower.motors.items()}
-
-    # Build motor_id -> schema joint name mapping (e.g. 1 -> "_1") for MQTT publish
-    motor_id_to_schema_joint: Dict[int, str] = {}
-    try:
-        schema_joint_names = robot.get_controllable_joint_names()
-        for _, motor in follower.motors.items():
-            motor_id = motor.id
-            idx = motor_id - 1
-            if idx < len(schema_joint_names):
-                motor_id_to_schema_joint[motor_id] = schema_joint_names[idx]
-            else:
-                motor_id_to_schema_joint[motor_id] = f"_{motor_id}"
-    except Exception:
-        motor_id_to_schema_joint = {
-            motor.id: f"_{motor.id}" for _, motor in follower.motors.items()
-        }
 
     # Initialize current state with follower's current observation
     current_state: Dict[str, float] = {}
@@ -348,9 +329,7 @@ def remoteoperate(
                 twin = item
                 overrides = {}
             if "camera_id" not in overrides:
-                overrides["camera_id"] = (
-                    follower_cameras[idx] if idx < len(follower_cameras) else 0
-                )
+                overrides["camera_id"] = follower_cameras[idx] if idx < len(follower_cameras) else 0
             overrides.setdefault("fps", camera_fps)
             enriched_twins.append((twin, overrides))
 
@@ -375,9 +354,8 @@ def remoteoperate(
         def command_callback(status: str, msg: str, camera_name: str = "default"):
             if status_tracker:
                 msg_lower = msg.lower()
-                if (
-                    "started" in msg_lower
-                    or (status == "ok" and ("streaming" in msg_lower or "running" in msg_lower))
+                if "started" in msg_lower or (
+                    status == "ok" and ("streaming" in msg_lower or "running" in msg_lower)
                 ):
                     status_tracker.update_webrtc_state(camera_name, "streaming")
                     status_tracker.update_camera_status(camera_name, detected=True, started=True)
@@ -414,6 +392,7 @@ def remoteoperate(
         follower=follower,
         follower_calibration=follower_calibration,
         status_tracker=status_tracker,
+        schema_joint_to_motor_id=schema_joint_to_motor_id,
     )
 
     # Subscribe to joint states
@@ -524,20 +503,22 @@ def main():
             wrist_fps = setup_config.get("camera_fps", 30)
             wrist_res = setup_config.get("wrist_camera_resolution", "VGA")
             wrist_res_enum = parse_resolution_to_enum(wrist_res)
-            cameras_list.append({
-                "twin": twin,
-                "camera_id": setup_config.get("wrist_camera_id", 0),
-                "camera_type": "cv2",
-                "camera_resolution": wrist_res_enum,
-                "camera_name": setup_config.get("wrist_camera_name", "wrist_camera"),
-                "fps": wrist_fps,
-                "fourcc": setup_config.get("wrist_camera_fourcc"),
-                "keyframe_interval": setup_config.get("wrist_camera_keyframe_interval"),
-                "enable_depth": False,
-                "depth_fps": 30,
-                "depth_resolution": None,
-                "depth_publish_interval": 30,
-            })
+            cameras_list.append(
+                {
+                    "twin": twin,
+                    "camera_id": setup_config.get("wrist_camera_id", 0),
+                    "camera_type": "cv2",
+                    "camera_resolution": wrist_res_enum,
+                    "camera_name": setup_config.get("wrist_camera_name", "wrist_camera"),
+                    "fps": wrist_fps,
+                    "fourcc": setup_config.get("wrist_camera_fourcc"),
+                    "keyframe_interval": setup_config.get("wrist_camera_keyframe_interval"),
+                    "enable_depth": False,
+                    "depth_fps": 30,
+                    "depth_resolution": None,
+                    "depth_publish_interval": 30,
+                }
+            )
 
         for add in setup_config.get("additional_cameras", []):
             uuid = add.get("twin_uuid")
@@ -552,24 +533,30 @@ def main():
             depth_res = add.get("depth_resolution")
             depth_res_enum = None
             if depth_res and len(depth_res) >= 2:
-                depth_res_enum = Resolution.from_size(depth_res[0], depth_res[1]) or Resolution.closest(depth_res[0], depth_res[1])
-            cameras_list.append({
-                "twin": twin,
-                "camera_id": add.get("camera_id", 1),
-                "camera_type": add.get("camera_type", "cv2"),
-                "camera_resolution": cam_res,
-                "camera_name": add.get("camera_name", "external"),
-                "fps": add.get("fps", 30),
-                "fourcc": add.get("fourcc"),
-                "enable_depth": add.get("enable_depth", False),
-                "depth_fps": add.get("depth_fps", 30),
-                "depth_resolution": depth_res_enum,
-                "depth_publish_interval": add.get("depth_publish_interval", 30),
-            })
+                depth_res_enum = Resolution.from_size(
+                    depth_res[0], depth_res[1]
+                ) or Resolution.closest(depth_res[0], depth_res[1])
+            cameras_list.append(
+                {
+                    "twin": twin,
+                    "camera_id": add.get("camera_id", 1),
+                    "camera_type": add.get("camera_type", "cv2"),
+                    "camera_resolution": cam_res,
+                    "camera_name": add.get("camera_name", "external"),
+                    "fps": add.get("fps", 30),
+                    "fourcc": add.get("fourcc"),
+                    "enable_depth": add.get("enable_depth", False),
+                    "depth_fps": add.get("depth_fps", 30),
+                    "depth_resolution": depth_res_enum,
+                    "depth_publish_interval": add.get("depth_publish_interval", 30),
+                }
+            )
 
     # Resolve twin UUID and ports: CLI/env > setup.json (so remoteoperate works with no args when setup exists)
-    effective_twin_uuid = args.twin_uuid or setup_config.get("twin_uuid") or setup_config.get(
-        "wrist_camera_twin_uuid"
+    effective_twin_uuid = (
+        args.twin_uuid
+        or setup_config.get("twin_uuid")
+        or setup_config.get("wrist_camera_twin_uuid")
     )
     effective_follower_port = args.follower_port or setup_config.get("follower_port")
     if not effective_twin_uuid:
