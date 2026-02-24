@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from cyberwave import Cyberwave, Twin
+from cyberwave.constants import SOURCE_TYPE_EDGE_FOLLOWER
 from cyberwave.sensor import CameraStreamManager, Resolution
 from cyberwave.utils import TimeReference
 from dotenv import load_dotenv
@@ -189,30 +190,28 @@ def remoteoperate(
     else:
         status_tracker.update_mqtt_status(mqtt_client.connected if mqtt_client else False)
 
-    # Send initial observation to Cyberwave using publish_initial_observation
+    # Send initial position per joint before starting remote operation (same format as heartbeat)
     try:
-        # Get follower's current observation (normalized positions)
         follower_obs = follower.get_observation()
-
-        # Convert to schema joint format for initial observation (same as teleoperate)
-        observations = {}
+        timestamp = time.time()
         for joint_key, normalized_pos in follower_obs.items():
             name = joint_key.removesuffix(".pos")
-            if name in follower.motors:
-                joint_index = follower.motors[name].id
-                norm_mode = joint_name_to_norm_mode[name]
-                schema_joint = motor_id_to_schema_joint.get(joint_index, f"_{joint_index}")
-
-                calib = follower_calibration.get(name) if follower_calibration else None
-                radians = normalized_to_radians(normalized_pos, norm_mode, calib)
-                observations[schema_joint] = radians
-
-        # Send initial observation
-        mqtt_client.publish_initial_observation(
-            twin_uuid=twin_uuid,
-            observations=observations,
-            fps=CONTROL_RATE_HZ,
-        )
+            if name not in follower.motors:
+                continue
+            joint_index = follower.motors[name].id
+            norm_mode = joint_name_to_norm_mode.get(name)
+            if norm_mode is None:
+                continue
+            schema_joint = motor_id_to_schema_joint.get(joint_index, f"_{joint_index}")
+            calib = follower_calibration.get(name) if follower_calibration else None
+            radians = normalized_to_radians(normalized_pos, norm_mode, calib)
+            mqtt_client.update_joint_state(
+                twin_uuid=twin_uuid,
+                joint_name=schema_joint,
+                position=radians,
+                timestamp=timestamp,
+                source_type=SOURCE_TYPE_EDGE_FOLLOWER,
+            )
 
     except Exception:
         if status_tracker:
