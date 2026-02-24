@@ -6,7 +6,7 @@ import threading
 import time
 from typing import Dict, List, Optional
 
-from errors import DeviceAlreadyConnectedError
+from utils.errors import DeviceAlreadyConnectedError
 
 from .bus import MotorsBus
 from .encoding import decode_sign_magnitude, encode_sign_magnitude

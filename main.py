@@ -11,8 +11,6 @@ import signal
 import sys
 import threading
 from typing import Optional
-from config import FollowerConfig
-from follower import SO101Follower
 
 from cyberwave import Cyberwave
 
@@ -74,7 +72,8 @@ def _trigger_alert_and_switch_to_calibration(
         # Run the calibration script as a subprocess
         calibrate_cmd = [
             sys.executable,
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "calibrate.py"),
+            "-m",
+            "scripts.cw_calibrate",
             "--type",
             "follower",
             "--port",
@@ -95,7 +94,8 @@ def _trigger_alert_and_switch_to_calibration(
         if leader_port is not None:
             leader_cmd = [
                 sys.executable,
-                os.path.join(os.path.dirname(os.path.abspath(__file__)), "calibrate.py"),
+                "-m",
+                "scripts.cw_calibrate",
                 "--type",
                 "leader",
                 "--port",
@@ -210,7 +210,7 @@ def start_teleoperate(client: Cyberwave, twin_uuid: str, controller: dict) -> No
     max_relative_target = float(max_relative_target_str) if max_relative_target_str else None
 
     # Check if the follower is calibrated. if not, trigger an alert and switch to calibration mode
-    if not _is_follower_calibrated(follower_port):
+    if not _is_follower_calibrated(follower_id):
         _trigger_alert_and_switch_to_calibration(client, twin_uuid, follower_port, follower_id)
         return
 
@@ -223,9 +223,10 @@ def start_teleoperate(client: Cyberwave, twin_uuid: str, controller: dict) -> No
     def _run() -> None:
         global _current_follower
 
-        from config import FollowerConfig
-        from follower import SO101Follower
-        from remoteoperate import _parse_resolution, remoteoperate
+        from scripts.cw_remoteoperate import remoteoperate
+        from scripts.cw_setup import _parse_resolution
+        from so101.follower import SO101Follower
+        from utils.config import FollowerConfig
 
         # Robot twin
         robot = client.twin(
@@ -327,10 +328,12 @@ def start_localop(client: Cyberwave, twin_uuid: str, controller: dict) -> None:
     def _run() -> None:
         global _current_follower
 
-        from config import FollowerConfig, LeaderConfig
-        from follower import SO101Follower
-        from leader import SO101Leader
-        from teleoperate import _parse_resolution, teleoperate
+        from scripts.cw_setup import _parse_resolution
+        from scripts.cw_remoteoperate import remoteoperate
+        from scripts.cw_teleoperate import teleoperate
+        from so101.follower import SO101Follower
+        from so101.leader import SO101Leader
+        from utils.config import FollowerConfig, LeaderConfig
 
         # Robot twin
         robot = client.twin(

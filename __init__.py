@@ -1,10 +1,10 @@
 """Standalone SO101 Robot Library."""
 
-from config import FollowerConfig, LeaderConfig
-from follower import SO101Follower
-from leader import SO101Leader
-from teleoperate import teleoperate
-from utils import (
+from scripts.cw_teleoperate import teleoperate
+from so101.follower import SO101Follower
+from so101.leader import SO101Leader
+from utils.config import FollowerConfig, LeaderConfig
+from utils.utils import (
     detect_voltage_rating,
     find_available_ports,
     find_port,
@@ -25,5 +25,5 @@ __all__ = [
     "detect_voltage_rating",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 

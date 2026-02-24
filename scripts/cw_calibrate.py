@@ -13,11 +13,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from config import FollowerConfig, LeaderConfig
-from follower import SO101Follower
-from leader import SO101Leader
-from cw_setup import update_setup_port
-from utils import find_port, setup_logging
+from scripts.cw_setup import update_setup_port
+from so101.follower import SO101Follower
+from so101.leader import SO101Leader
+from utils.config import FollowerConfig, LeaderConfig
+from utils.utils import find_port, setup_logging
 
 logger = logging.getLogger(__name__)
 

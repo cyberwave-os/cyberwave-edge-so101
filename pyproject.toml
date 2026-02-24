@@ -46,13 +46,13 @@ dev = [
 ]
 
 [project.scripts]
-so101-find-port = "find_port:main"
-so101-read-device = "read_device:main"
-so101-calibrate = "calibrate:main"
-so101-setup = "cw_setup:main"
-so101-teleoperate = "teleoperate:main"
-so101-write-position = "write_position:main"
-so101-remoteoperate = "remoteoperate:main"
+so101-find-port = "scripts.cw_find_port:main"
+so101-read-device = "scripts.cw_read_device:main"
+so101-calibrate = "scripts.cw_calibrate:main"
+so101-setup = "scripts.cw_setup:main"
+so101-teleoperate = "scripts.cw_teleoperate:main"
+so101-write-position = "scripts.cw_write_position:main"
+so101-remoteoperate = "scripts.cw_remoteoperate:main"
 
 [project.urls]
 Homepage = "https://github.com/cyberwave/cyberwave-edge-python-so101"
@@ -60,10 +60,9 @@ Repository = "https://github.com/cyberwave/cyberwave-edge-python-so101"
 Issues = "https://github.com/cyberwave/cyberwave-edge-python-so101/issues"
 
 [tool.setuptools]
-# Package structure: root-level modules + motors subpackage
-# Since files are in root, we map the root to the package name
+# Package structure: motors, so101, utils, scripts subpackages
 package-dir = {"" = "."}
-packages = {find = {where = ["."]}}
+packages = {find = {where = ["."], include = ["motors*", "so101*", "utils*", "scripts*"]}}
 
 [tool.setuptools.package-data]
 "*" = ["*.md", "*.txt"]

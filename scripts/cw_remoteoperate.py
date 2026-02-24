@@ -40,12 +40,12 @@ except ImportError:
     RealSenseConfig = None
     RealSenseDiscovery = None
 
-from config import get_setup_config_path
-from cw_setup import load_setup_config
-from follower import SO101Follower
 from motors import MotorNormMode
-from utils import load_calibration
-from write_position import validate_position
+from scripts.cw_setup import load_setup_config
+from scripts.cw_write_position import validate_position
+from so101.follower import SO101Follower
+from utils.config import get_setup_config_path
+from utils.utils import load_calibration
 
 logger = logging.getLogger(__name__)
 
@@ -1998,7 +1998,7 @@ def main():
     mqtt_client = cyberwave_client.mqtt
 
     # Initialize follower
-    from config import FollowerConfig
+    from utils.config import FollowerConfig
 
     # Only configure cameras on the follower if camera(s) are being used
     follower_cameras = None

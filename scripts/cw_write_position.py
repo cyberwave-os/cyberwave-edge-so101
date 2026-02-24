@@ -8,9 +8,9 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from config import FollowerConfig, LeaderConfig
-from follower import SO101Follower
-from leader import SO101Leader
+from utils.config import FollowerConfig, LeaderConfig
+from so101.follower import SO101Follower
+from so101.leader import SO101Leader
 from motors import MotorNormMode
 
 logger = logging.getLogger(__name__)

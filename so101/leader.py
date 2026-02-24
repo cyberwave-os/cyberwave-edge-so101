@@ -4,16 +4,16 @@ import logging
 from pathlib import Path
 from typing import Dict, Optional
 
+from so101.robot import SO101Robot
 from serial.serialutil import SerialException
 
-from config import LeaderConfig
-from errors import DeviceNotConnectedError
 from motors import (
     FeetechMotorsBus,
     MotorCalibration,
 )
-from robot import SO101Robot
-from utils import load_calibration
+from utils.config import LeaderConfig
+from utils.errors import DeviceNotConnectedError
+from utils.utils import load_calibration
 
 logger = logging.getLogger(__name__)
 

@@ -7,7 +7,6 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from errors import DeviceNotConnectedError
 from motors import (
     FeetechMotorsBus,
     Motor,
@@ -15,6 +14,7 @@ from motors import (
     MotorNormMode,
 )
 from motors.tables import MODE_POSITION
+from utils.errors import DeviceNotConnectedError
 
 logger = logging.getLogger(__name__)
 

@@ -41,12 +41,12 @@ except ImportError:
     RealSenseConfig = None
     RealSenseDiscovery = None
 
-from config import get_setup_config_path
-from follower import SO101Follower
-from leader import SO101Leader
 from motors import MotorNormMode
-from cw_setup import load_setup_config
-from utils import load_calibration
+from scripts.cw_setup import load_setup_config
+from so101.follower import SO101Follower
+from so101.leader import SO101Leader
+from utils.config import get_setup_config_path
+from utils.utils import load_calibration
 
 logger = logging.getLogger(__name__)
 
@@ -1907,7 +1907,7 @@ def main():
                 "--follower-port is required when using --camera-only. "
                 "Calibrate the follower first (so101-calibrate) or pass --follower-port."
             )
-        from config import FollowerConfig
+        from utils.config import FollowerConfig
 
         # Only configure cameras on the follower if camera(s) are being used
         follower_cameras = None

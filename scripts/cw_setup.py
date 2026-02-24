@@ -14,7 +14,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from config import get_setup_config_path
+from utils.config import get_setup_config_path
 
 # RealSense optional
 try:

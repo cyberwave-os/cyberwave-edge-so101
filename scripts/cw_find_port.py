@@ -8,7 +8,7 @@ Example:
 
 import sys
 
-from utils import find_port
+from utils.utils import find_port
 from dotenv import load_dotenv
 
 

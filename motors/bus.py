@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from typing import Dict, List
 
-from errors import DeviceNotConnectedError
+from utils.errors import DeviceNotConnectedError
 
 
 class MotorsBus(ABC):

@@ -11,8 +11,8 @@ import sys
 import time
 from typing import Dict, List, Optional
 
-from leader import SO101_LEADER_MOTORS
-from utils import (
+from so101.leader import SO101_LEADER_MOTORS
+from utils.utils import (
     detect_voltage_rating,
     find_available_ports,
     find_port,
