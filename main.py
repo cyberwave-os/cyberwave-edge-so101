@@ -131,22 +131,64 @@ def _trigger_alert_and_switch_to_calibration(
 
 def _is_follower_calibrated(follower_id: str = "follower1") -> bool:
     """Check if the follower is calibrated."""
-    from pathlib import Path
+    from utils.config import get_so101_lib_dir
 
-    calibration_path = (
-        Path.home() / ".cyberwave" / "so101_lib" / "calibrations" / f"{follower_id}.json"
-    )
-    return calibration_path.exists()
+    return (get_so101_lib_dir() / "calibrations" / f"{follower_id}.json").exists()
 
 
 def _is_leader_calibrated(leader_id: str = "leader1") -> bool:
     """Check if the leader is calibrated."""
-    from pathlib import Path
+    from utils.config import get_so101_lib_dir
 
-    calibration_path = (
-        Path.home() / ".cyberwave" / "so101_lib" / "calibrations" / f"{leader_id}.json"
+    return (get_so101_lib_dir() / "calibrations" / f"{leader_id}.json").exists()
+
+
+def _ensure_setup(twin_uuid: str) -> None:
+    """Run cw_setup to bootstrap setup.json if missing. Uses files from edge-core."""
+    import subprocess
+
+    from utils.config import get_setup_config_path
+
+    path = get_setup_config_path()
+    if path.exists():
+        logger.info("Setup already exists at %s", path)
+        return
+    logger.info("Bootstrapping setup.json via cw_setup for twin %s", twin_uuid)
+    result = subprocess.run(
+        [sys.executable, "-m", "scripts.cw_setup", "--twin-uuid", twin_uuid],
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
-    return calibration_path.exists()
+    if result.returncode != 0:
+        logger.warning("cw_setup exited %d: %s", result.returncode, result.stderr or result.stdout)
+    else:
+        logger.info("Setup bootstrapped at %s", path)
+
+
+def _get_hardware_config(twin_uuid: str) -> dict:
+    """Load hardware config from setup.json (from edge-core mount), fall back to env vars."""
+    from scripts.cw_setup import load_setup_config
+
+    setup = load_setup_config()
+    if setup.get("twin_uuid") != twin_uuid:
+        setup = {}
+    return {
+        "follower_port": setup.get("follower_port") or os.getenv("CYBERWAVE_METADATA_FOLLOWER_PORT"),
+        "leader_port": setup.get("leader_port") or os.getenv("CYBERWAVE_METADATA_LEADER_PORT"),
+        "max_relative_target": setup.get("max_relative_target")
+        or os.getenv("CYBERWAVE_METADATA_MAX_RELATIVE_TARGET"),
+        "follower_id": "follower1",
+        "leader_id": "leader1",
+        "camera_twin_uuid": setup.get("wrist_camera_twin_uuid") or setup.get("camera_twin_uuid")
+        or os.getenv("CYBERWAVE_METADATA_CAMERA_TWIN_UUID"),
+        "camera_type": "cv2",
+        "camera_fps": setup.get("camera_fps") or int(os.getenv("CYBERWAVE_METADATA_CAMERA_FPS", "30")),
+        "camera_resolution": setup.get("wrist_camera_resolution")
+        or setup.get("camera_resolution")
+        or setup.get("resolution")
+        or os.getenv("CYBERWAVE_METADATA_CAMERA_RESOLUTION", "VGA"),
+    }
 
 
 def _stop_current_operation() -> None:
@@ -305,35 +347,33 @@ def start_remoteoperate(client: Cyberwave, twin_uuid: str) -> None:
     """Start remote operation (so101-remoteoperate) for the SO101 follower.
 
     Receives joint states from the frontend via MQTT and writes to the follower.
-    Reads hardware configuration from ``CYBERWAVE_METADATA_*`` environment
-    variables, creates the follower + twins, and launches the ``remoteoperate``
-    loop from :pymod:`scripts.cw_remoteoperate` in a background thread so the
-    MQTT command listener keeps running.
+    Reads hardware configuration from setup.json (from edge-core mount) or
+    ``CYBERWAVE_METADATA_*`` env vars, creates the follower + twins, and
+    launches the ``remoteoperate`` loop from :pymod:`scripts.cw_remoteoperate`.
     """
     global _current_thread, _current_follower
 
     logger.info("Starting remoteoperate")
 
-    # -- hardware config from environment -----------------------------------
-    follower_port = os.getenv("CYBERWAVE_METADATA_FOLLOWER_PORT")
+    cfg = _get_hardware_config(twin_uuid)
+    follower_port = cfg["follower_port"]
     if not follower_port:
-        logger.error("CYBERWAVE_METADATA_FOLLOWER_PORT is not set – cannot start remoteoperate")
+        logger.error("follower_port not set in setup.json or env – cannot start remoteoperate")
         return
 
-    follower_id = os.getenv("CYBERWAVE_METADATA_FOLLOWER_ID", "follower1")
-    max_relative_target_str = os.getenv("CYBERWAVE_METADATA_MAX_RELATIVE_TARGET")
-    max_relative_target = float(max_relative_target_str) if max_relative_target_str else None
+    follower_id = cfg["follower_id"]
+    max_relative_target = (
+        float(cfg["max_relative_target"]) if cfg["max_relative_target"] else None
+    )
 
-    # Check if the follower is calibrated. if not, trigger an alert and switch to calibration mode
     if not _is_follower_calibrated(follower_id):
         _trigger_alert_and_switch_to_calibration(client, twin_uuid, follower_port, follower_id)
         return
 
-    # -- camera config (deprecated) -------------------------------------------
-    camera_twin_uuid = os.getenv("CYBERWAVE_METADATA_CAMERA_TWIN_UUID")
-    camera_type = os.getenv("CYBERWAVE_METADATA_CAMERA_TYPE", "cv2")
-    camera_fps = int(os.getenv("CYBERWAVE_METADATA_CAMERA_FPS", "30"))
-    camera_resolution_str = os.getenv("CYBERWAVE_METADATA_CAMERA_RESOLUTION", "VGA")
+    camera_twin_uuid = cfg["camera_twin_uuid"]
+    camera_type = cfg["camera_type"]
+    camera_fps = cfg["camera_fps"]
+    camera_resolution_str = str(cfg["camera_resolution"])
 
     def _run() -> None:
         global _current_follower
@@ -405,43 +445,40 @@ def start_remoteoperate(client: Cyberwave, twin_uuid: str) -> None:
 def start_teleoperate(client: Cyberwave, twin_uuid: str) -> None:
     """Start local teleoperation (so101-teleoperate) for the SO101 leader+follower.
 
-    Reads hardware configuration from ``CYBERWAVE_METADATA_*`` environment
-    variables, creates the leader + follower + twins, and launches the
-    ``teleoperate`` loop from :pymod:`scripts.cw_teleoperate` in a background
-    thread so the MQTT command listener keeps running.
+    Reads hardware configuration from setup.json (from edge-core mount) or
+    ``CYBERWAVE_METADATA_*`` env vars, creates the leader + follower + twins,
+    and launches the ``teleoperate`` loop from :pymod:`scripts.cw_teleoperate`.
     """
     global _current_thread, _current_follower
 
     logger.info("Starting teleoperate")
 
-    # -- hardware config from environment -----------------------------------
-    follower_port = os.getenv("CYBERWAVE_METADATA_FOLLOWER_PORT")
+    cfg = _get_hardware_config(twin_uuid)
+    follower_port = cfg["follower_port"]
+    leader_port = cfg["leader_port"]
     if not follower_port:
-        logger.error("CYBERWAVE_METADATA_FOLLOWER_PORT is not set – cannot start teleoperate")
+        logger.error("follower_port not set in setup.json or env – cannot start teleoperate")
         return
-
-    leader_port = os.getenv("CYBERWAVE_METADATA_LEADER_PORT")
     if not leader_port:
-        logger.error("CYBERWAVE_METADATA_LEADER_PORT is not set – cannot start teleoperate")
+        logger.error("leader_port not set in setup.json or env – cannot start teleoperate")
         return
 
-    follower_id = os.getenv("CYBERWAVE_METADATA_FOLLOWER_ID", "follower1")
-    leader_id = os.getenv("CYBERWAVE_METADATA_LEADER_ID", "leader1")
-    max_relative_target_str = os.getenv("CYBERWAVE_METADATA_MAX_RELATIVE_TARGET")
-    max_relative_target = float(max_relative_target_str) if max_relative_target_str else None
+    follower_id = cfg["follower_id"]
+    leader_id = cfg["leader_id"]
+    max_relative_target = (
+        float(cfg["max_relative_target"]) if cfg["max_relative_target"] else None
+    )
 
-    # Check if the follower and leader are calibrated. if not, trigger an alert and switch to calibration mode
     if not _is_follower_calibrated(follower_id) or not _is_leader_calibrated(leader_id):
         _trigger_alert_and_switch_to_calibration(
             client, twin_uuid, follower_port, follower_id, leader_port, leader_id
         )
         return
 
-    # -- camera config (optional) -------------------------------------------
-    camera_twin_uuid = os.getenv("CYBERWAVE_METADATA_CAMERA_TWIN_UUID")
-    camera_type = os.getenv("CYBERWAVE_METADATA_CAMERA_TYPE", "cv2")
-    camera_fps = int(os.getenv("CYBERWAVE_METADATA_CAMERA_FPS", "30"))
-    camera_resolution_str = os.getenv("CYBERWAVE_METADATA_CAMERA_RESOLUTION", "VGA")
+    camera_twin_uuid = cfg["camera_twin_uuid"]
+    camera_type = cfg["camera_type"]
+    camera_fps = cfg["camera_fps"]
+    camera_resolution_str = str(cfg["camera_resolution"])
 
     def _run() -> None:
         global _current_follower
@@ -533,6 +570,9 @@ async def main() -> None:
         sys.exit(1)
 
     logger.info("Initializing SO101 edge node for twin %s", twin_uuid)
+
+    # Ensure setup.json exists (bootstrap via cw_setup if missing; uses edge-core mount)
+    _ensure_setup(twin_uuid)
 
     # Initialize the Cyberwave SDK client (reads remaining config from env vars)
     client = Cyberwave(token=token, source_type="edge")

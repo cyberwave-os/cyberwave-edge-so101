@@ -1,5 +1,6 @@
 """Configuration dataclasses for SO101 leader and follower."""
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Literal, Optional, Union
@@ -9,7 +10,15 @@ VoltageRating = Literal[5, 12]
 
 
 def get_so101_lib_dir() -> Path:
-    """Get the SO101 lib directory (same as calibrate saves to)."""
+    """Get the SO101 lib directory (same as calibrate saves to).
+
+    When running in edge-core's Docker container, CYBERWAVE_EDGE_CONFIG_DIR
+    is set to /app/.cyberwave (mounted from host). Use that so the driver
+    finds setup.json written by so101-setup / cw_setup.
+    """
+    edge_config = os.getenv("CYBERWAVE_EDGE_CONFIG_DIR")
+    if edge_config and edge_config.strip():
+        return Path(edge_config.strip()) / "so101_lib"
     return Path.home() / ".cyberwave" / "so101_lib"
 
 
