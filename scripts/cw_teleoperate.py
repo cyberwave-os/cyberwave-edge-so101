@@ -421,6 +421,7 @@ def teleoperate(
                 follower_calibration=follower_calibration,
                 joint_name_to_norm_mode=joint_name_to_norm_mode,
                 motor_id_to_schema_joint=motor_id_to_schema_joint,
+                fps=CONTROL_RATE_HZ,
             )
     except Exception:
         if status_tracker:

@@ -156,15 +156,17 @@ def publish_initial_observations(
     follower_calibration: Optional[Dict[str, Any]],
     joint_name_to_norm_mode: Dict[str, MotorNormMode],
     motor_id_to_schema_joint: Dict[int, str],
+    fps: int = 100,
 ) -> None:
     """
-    Publish initial observations for both leader and follower to Cyberwave.
+    Publish a single telemetry_start with both leader and follower observations.
 
-    Each source is published with its source_type in the MQTT metadata (edge_leader,
-    edge_follower) so telemetry can distinguish them.
+    Waits for both leader and follower to read positions, then sends one message
+    with observations keyed by source_type: {"edge_leader": {...}, "edge_follower": {...}}.
+    Registers the twin so no duplicate telemetry_start is sent on first joint update.
     """
     twin_uuid = str(robot.uuid)
-    timestamp = time.time()
+    observations: Dict[str, Dict[str, float]] = {}
 
     if leader is not None:
         leader_obs = leader.get_observation()
@@ -175,14 +177,7 @@ def publish_initial_observations(
             joint_name_to_norm_mode,
             motor_id_to_schema_joint,
         )
-        for schema_joint, position in leader_joints.items():
-            mqtt_client.update_joint_state(
-                twin_uuid=twin_uuid,
-                joint_name=schema_joint,
-                position=position,
-                timestamp=timestamp,
-                source_type=SOURCE_TYPE_EDGE_LEADER,
-            )
+        observations[SOURCE_TYPE_EDGE_LEADER] = leader_joints
 
     if follower is not None:
         follower_obs = follower.get_observation()
@@ -193,11 +188,11 @@ def publish_initial_observations(
             joint_name_to_norm_mode,
             motor_id_to_schema_joint,
         )
-        for schema_joint, position in follower_joints.items():
-            mqtt_client.update_joint_state(
-                twin_uuid=twin_uuid,
-                joint_name=schema_joint,
-                position=position,
-                timestamp=timestamp,
-                source_type=SOURCE_TYPE_EDGE_FOLLOWER,
-            )
+        observations[SOURCE_TYPE_EDGE_FOLLOWER] = follower_joints
+
+    if observations:
+        metadata: Dict[str, Any] = {
+            "fps": fps,
+            "observations": observations,
+        }
+        mqtt_client.publish_telemetry_start(twin_uuid, metadata)
