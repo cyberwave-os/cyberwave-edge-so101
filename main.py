@@ -143,36 +143,161 @@ def _is_leader_calibrated(leader_id: str = "leader1") -> bool:
     return (get_so101_lib_dir() / "calibrations" / f"{leader_id}.json").exists()
 
 
-def _ensure_setup(twin_uuid: str) -> None:
-    """Run cw_setup to bootstrap setup.json if missing. Uses files from edge-core."""
-    import subprocess
+def _get_config_dir():
+    """Edge config dir (twin JSONs from edge-core)."""
+    from utils.config import get_so101_lib_dir
 
+    return get_so101_lib_dir().parent
+
+
+def _load_all_twin_jsons() -> list[dict]:
+    """Load all twin JSON files from edge config dir (from edge-core)."""
+    import json
+    import uuid as uuid_module
+
+    config_dir = _get_config_dir()
+    if not config_dir.is_dir():
+        return []
+    result: list[dict] = []
+    for p in config_dir.glob("*.json"):
+        if p.name in ("credentials.json", "environment.json", "fingerprint.json"):
+            continue
+        try:
+            uuid_module.UUID(p.stem)
+        except ValueError:
+            continue
+        try:
+            with open(p) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(data, dict) and "uuid" in data:
+            result.append(data)
+    return result
+
+
+def _discover_cameras_for_so101(so101_uuid: str) -> list[dict]:
+    """Find camera twins attached to SO101 (attach_to_twin_uuid == so101_uuid). Max 2."""
+    twins = _load_all_twin_jsons()
+    attached: list[dict] = []
+    for t in twins:
+        attach = t.get("attach_to_twin_uuid") or t.get("attach_to_twin")
+        if str(attach) != str(so101_uuid):
+            continue
+        asset = t.get("asset") or {}
+        reg = (asset.get("registry_id") or asset.get("metadata", {}).get("registry_id") or "").lower()
+        cam_type = "realsense" if "realsense" in reg else "cv2"
+        attached.append({
+            "twin_uuid": t.get("uuid"),
+            "attach_to_link": t.get("attach_to_link", ""),
+            "camera_type": cam_type,
+            "camera_id": 0 if "wrist" in (t.get("attach_to_link") or "").lower() else 1,
+        })
+    # Sort: wrist first (attach_to_link contains "wrist"), then others
+    attached.sort(key=lambda c: (0 if "wrist" in (c.get("attach_to_link") or "").lower() else 1, c.get("twin_uuid", "")))
+    return attached[:2]
+
+
+def _ensure_setup(twin_uuid: str) -> None:
+    """Bootstrap setup.json from twin JSONs (attach_to_twin_uuid). Uses edge-core files."""
+    from scripts.cw_setup import (
+        _parse_resolution,
+        create_setup_config,
+        load_setup_config,
+        save_setup_config,
+    )
     from utils.config import get_setup_config_path
 
     path = get_setup_config_path()
-    if path.exists():
-        logger.info("Setup already exists at %s", path)
-        return
-    logger.info("Bootstrapping setup.json via cw_setup for twin %s", twin_uuid)
-    result = subprocess.run(
-        [sys.executable, "-m", "scripts.cw_setup", "--twin-uuid", twin_uuid],
-        capture_output=True,
-        text=True,
-        timeout=30,
+    existing = load_setup_config(path) if path.exists() else {}
+
+    cameras = _discover_cameras_for_so101(twin_uuid)
+    wrist_cam = next((c for c in cameras if "wrist" in (c.get("attach_to_link") or "").lower()), None)
+    add_cams = [c for c in cameras if c != wrist_cam]
+
+    config = create_setup_config(
+        twin_uuid=twin_uuid,
+        wrist_camera=bool(wrist_cam),
+        wrist_camera_twin_uuid=twin_uuid if wrist_cam else None,
+        wrist_camera_id=wrist_cam.get("camera_id", 0) if wrist_cam else 0,
+        additional_camera_type=add_cams[0].get("camera_type", "cv2") if add_cams else None,
+        additional_camera_id=add_cams[0].get("camera_id", 1) if add_cams else 1,
+        additional_camera_twin_uuid=str(add_cams[0].get("twin_uuid")) if add_cams else None,
     )
-    if result.returncode != 0:
-        logger.warning("cw_setup exited %d: %s", result.returncode, result.stderr or result.stdout)
-    else:
-        logger.info("Setup bootstrapped at %s", path)
+    # Merge with existing (ports from calibrate)
+    for k in ("leader_port", "follower_port", "max_relative_target", "camera_fps"):
+        if existing.get(k) is not None:
+            config[k] = existing[k]
+    # Second additional camera (SO101 supports up to 2 cameras)
+    if len(add_cams) > 1:
+        res = _parse_resolution("VGA")
+        config["additional_cameras"].append({
+            "camera_type": add_cams[1].get("camera_type", "cv2"),
+            "camera_id": add_cams[1].get("camera_id", 2),
+            "camera_name": "external2",
+            "twin_uuid": str(add_cams[1].get("twin_uuid", "")),
+            "fps": config.get("camera_fps", 30),
+            "resolution": res,
+            "enable_depth": False,
+            "depth_fps": 30,
+            "depth_resolution": None,
+            "depth_publish_interval": 30,
+        })
+    save_setup_config(config, path)
+    logger.info("Setup updated at %s (wrist=%s, additional=%d)", path, bool(wrist_cam), len(add_cams))
 
 
 def _get_hardware_config(twin_uuid: str) -> dict:
-    """Load hardware config from setup.json (from edge-core mount), fall back to env vars."""
+    """Load hardware config from setup.json (from edge-core mount), fall back to env vars.
+
+    Returns cameras list: each {twin_uuid, camera_type, camera_id, resolution, fps}.
+    - Wrist camera streams to SO101 twin (twin_uuid=so101_uuid).
+    - Additional cameras stream to their own twin.
+    """
     from scripts.cw_setup import load_setup_config
 
     setup = load_setup_config()
     if setup.get("twin_uuid") != twin_uuid:
         setup = {}
+    fps = setup.get("camera_fps") or int(os.getenv("CYBERWAVE_METADATA_CAMERA_FPS", "30"))
+    res = (
+        setup.get("wrist_camera_resolution")
+        or setup.get("camera_resolution")
+        or setup.get("resolution")
+        or os.getenv("CYBERWAVE_METADATA_CAMERA_RESOLUTION", "VGA")
+    )
+    cameras: list[dict] = []
+    if setup.get("wrist_camera") and setup.get("wrist_camera_twin_uuid"):
+        cameras.append({
+            "twin_uuid": setup["wrist_camera_twin_uuid"],
+            "camera_type": "cv2",
+            "camera_id": setup.get("wrist_camera_id", 0),
+            "resolution": res,
+            "fps": fps,
+        })
+    for i, ac in enumerate(setup.get("additional_cameras") or []):
+        if ac.get("twin_uuid"):
+            cameras.append({
+                "twin_uuid": ac["twin_uuid"],
+                "camera_type": ac.get("camera_type", "cv2"),
+                "camera_id": ac.get("camera_id", i + 1),
+                "resolution": ac.get("resolution", "VGA"),
+                "fps": ac.get("fps", fps),
+            })
+    if not cameras:
+        legacy = (
+            setup.get("wrist_camera_twin_uuid")
+            or setup.get("camera_twin_uuid")
+            or os.getenv("CYBERWAVE_METADATA_CAMERA_TWIN_UUID")
+        )
+        if legacy:
+            cameras.append({
+                "twin_uuid": legacy,
+                "camera_type": os.getenv("CYBERWAVE_METADATA_CAMERA_TYPE", "cv2"),
+                "camera_id": 0,
+                "resolution": res,
+                "fps": fps,
+            })
     return {
         "follower_port": setup.get("follower_port") or os.getenv("CYBERWAVE_METADATA_FOLLOWER_PORT"),
         "leader_port": setup.get("leader_port") or os.getenv("CYBERWAVE_METADATA_LEADER_PORT"),
@@ -180,14 +305,7 @@ def _get_hardware_config(twin_uuid: str) -> dict:
         or os.getenv("CYBERWAVE_METADATA_MAX_RELATIVE_TARGET"),
         "follower_id": "follower1",
         "leader_id": "leader1",
-        "camera_twin_uuid": setup.get("wrist_camera_twin_uuid") or setup.get("camera_twin_uuid")
-        or os.getenv("CYBERWAVE_METADATA_CAMERA_TWIN_UUID"),
-        "camera_type": "cv2",
-        "camera_fps": setup.get("camera_fps") or int(os.getenv("CYBERWAVE_METADATA_CAMERA_FPS", "30")),
-        "camera_resolution": setup.get("wrist_camera_resolution")
-        or setup.get("camera_resolution")
-        or setup.get("resolution")
-        or os.getenv("CYBERWAVE_METADATA_CAMERA_RESOLUTION", "VGA"),
+        "cameras": cameras,
     }
 
 
@@ -370,11 +488,6 @@ def start_remoteoperate(client: Cyberwave, twin_uuid: str) -> None:
         _trigger_alert_and_switch_to_calibration(client, twin_uuid, follower_port, follower_id)
         return
 
-    camera_twin_uuid = cfg["camera_twin_uuid"]
-    camera_type = cfg["camera_type"]
-    camera_fps = cfg["camera_fps"]
-    camera_resolution_str = str(cfg["camera_resolution"])
-
     def _run() -> None:
         global _current_follower
 
@@ -389,33 +502,40 @@ def start_remoteoperate(client: Cyberwave, twin_uuid: str) -> None:
             twin_id=twin_uuid,
         )
 
-        # Camera config (only when explicitly configured)
+        # Camera config from setup (wrist + additional, up to 2)
         cameras_list = []
-        if camera_twin_uuid:
+        for cam in cfg.get("cameras") or []:
+            cam_uuid = cam.get("twin_uuid")
+            if not cam_uuid:
+                continue
+            cam_type = cam.get("camera_type", "cv2")
             camera_asset = (
                 "intel/realsensed455"
-                if "realsense" in camera_type.lower()
+                if "realsense" in str(cam_type).lower()
                 else "cyberwave/standard-cam"
             )
             camera_twin = client.twin(
                 asset_key=camera_asset,
-                twin_id=camera_twin_uuid,
+                twin_id=cam_uuid,
             )
-            res_enum = parse_resolution_to_enum(camera_resolution_str)
+            res = cam.get("resolution", "VGA")
+            res_str = f"{res[0]}x{res[1]}" if isinstance(res, (list, tuple)) and len(res) >= 2 else str(res)
+            res_enum = parse_resolution_to_enum(res_str)
             cameras_list.append({
                 "twin": camera_twin,
-                "camera_id": 0,
-                "camera_type": camera_type,
+                "camera_id": cam.get("camera_id", 0),
+                "camera_type": cam_type,
                 "camera_resolution": res_enum,
-                "fps": camera_fps,
+                "fps": cam.get("fps", 30),
             })
 
         # Follower
+        cam_ids = [c["camera_id"] for c in cameras_list] if cameras_list else None
         follower_config = FollowerConfig(
             port=follower_port,
             max_relative_target=max_relative_target,
             id=follower_id,
-            cameras=[0] if cameras_list else None,
+            cameras=cam_ids,
         )
         follower = SO101Follower(config=follower_config)
         follower.connect()
@@ -475,11 +595,6 @@ def start_teleoperate(client: Cyberwave, twin_uuid: str) -> None:
         )
         return
 
-    camera_twin_uuid = cfg["camera_twin_uuid"]
-    camera_type = cfg["camera_type"]
-    camera_fps = cfg["camera_fps"]
-    camera_resolution_str = str(cfg["camera_resolution"])
-
     def _run() -> None:
         global _current_follower
 
@@ -495,25 +610,31 @@ def start_teleoperate(client: Cyberwave, twin_uuid: str) -> None:
             twin_id=twin_uuid,
         )
 
-        # Camera config (only when explicitly configured)
+        # Camera config from setup (wrist + additional, up to 2)
         cameras_list = []
-        if camera_twin_uuid:
+        for cam in cfg.get("cameras") or []:
+            cam_uuid = cam.get("twin_uuid")
+            if not cam_uuid:
+                continue
+            cam_type = cam.get("camera_type", "cv2")
             camera_asset = (
                 "intel/realsensed455"
-                if "realsense" in camera_type.lower()
+                if "realsense" in str(cam_type).lower()
                 else "cyberwave/standard-cam"
             )
             camera_twin = client.twin(
                 asset_key=camera_asset,
-                twin_id=camera_twin_uuid,
+                twin_id=cam_uuid,
             )
-            res_enum = parse_resolution_to_enum(camera_resolution_str)
+            res = cam.get("resolution", "VGA")
+            res_str = f"{res[0]}x{res[1]}" if isinstance(res, (list, tuple)) and len(res) >= 2 else str(res)
+            res_enum = parse_resolution_to_enum(res_str)
             cameras_list.append({
                 "twin": camera_twin,
-                "camera_id": 0,
-                "camera_type": camera_type,
+                "camera_id": cam.get("camera_id", 0),
+                "camera_type": cam_type,
                 "camera_resolution": res_enum,
-                "fps": camera_fps,
+                "fps": cam.get("fps", 30),
             })
 
         # Leader
@@ -522,11 +643,12 @@ def start_teleoperate(client: Cyberwave, twin_uuid: str) -> None:
         leader.connect()
 
         # Follower
+        cam_ids = [c["camera_id"] for c in cameras_list] if cameras_list else None
         follower_config = FollowerConfig(
             port=follower_port,
             max_relative_target=max_relative_target,
             id=follower_id,
-            cameras=[0] if cameras_list else None,
+            cameras=cam_ids,
         )
         follower = SO101Follower(config=follower_config)
         follower.connect()
