@@ -47,7 +47,8 @@ def cyberwave_update_worker(
 
     while not stop_event.is_set():
         try:
-            batch_updates: Dict[int, tuple] = {}
+            # Key by (joint_index, source_type) so leader and follower updates are both published
+            batch_updates: Dict[tuple, tuple] = {}
             batch_start_time = time.time()
 
             while True:
@@ -76,7 +77,8 @@ def cyberwave_update_worker(
                     calib = follower_calibration.get(joint_name) if follower_calibration else None
                     position = normalized_to_radians(normalized_position, norm_mode, calib)
                     source_type = action_data.get("source_type")
-                    batch_updates[joint_index] = (
+                    batch_key = (joint_index, source_type or "")
+                    batch_updates[batch_key] = (
                         position,
                         0.0,
                         0.0,
@@ -93,7 +95,7 @@ def cyberwave_update_worker(
             if batch_updates:
                 try:
                     joint_states: Dict[str, float] = {}
-                    for joint_index, batch_val in batch_updates.items():
+                    for (joint_index, _), batch_val in batch_updates.items():
                         position, _, _, timestamp, source_type = batch_val
                         schema_joint = (
                             motor_id_to_schema_joint.get(joint_index, str(joint_index))
