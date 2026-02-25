@@ -34,6 +34,7 @@ from utils.cw_remoteoperate_helpers import (
     motor_writer_worker,
     upload_calibration_to_twin,
 )
+from utils.cw_teleoperate_helpers import publish_initial_observations
 from utils.cw_utils import build_joint_mappings, resolve_calibration_for_edge
 from utils.keyboard import keyboard_input_thread
 from utils.trackers import StatusTracker, run_status_logging_thread
@@ -190,7 +191,26 @@ def remoteoperate(
     else:
         status_tracker.update_mqtt_status(mqtt_client.connected if mqtt_client else False)
 
-    # Send initial position per joint before starting remote operation (same format as heartbeat)
+    # Send telemetry_start with follower observations before any joint updates.
+    # This registers the twin so no duplicate telemetry_start is sent by heartbeat or camera.
+    if robot is not None and mqtt_client is not None:
+        try:
+            publish_initial_observations(
+                leader=None,
+                follower=follower,
+                robot=robot,
+                mqtt_client=mqtt_client,
+                leader_calibration=None,
+                follower_calibration=follower_calibration,
+                joint_name_to_norm_mode=joint_name_to_norm_mode,
+                motor_id_to_schema_joint=motor_id_to_schema_joint,
+                fps=CONTROL_RATE_HZ,
+            )
+        except Exception:
+            if status_tracker:
+                status_tracker.increment_errors()
+
+    # Send initial position per joint for real-time display (heartbeat will continue)
     try:
         follower_obs = follower.get_observation()
         timestamp = time.time()

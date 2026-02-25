@@ -281,6 +281,25 @@ def teleoperate(
     joint_index_to_name_str = {str(mid): name for mid, name in joint_index_to_name.items()}
     status_tracker.set_joint_index_to_name(joint_index_to_name_str)
 
+    # Send telemetry_start with both leader and follower observations before any joint updates.
+    # This registers the twin so no duplicate telemetry_start is sent by the worker or camera.
+    if robot is not None and mqtt_client is not None:
+        try:
+            publish_initial_observations(
+                leader=leader,
+                follower=follower,
+                robot=robot,
+                mqtt_client=mqtt_client,
+                leader_calibration=leader_calibration,
+                follower_calibration=follower_calibration,
+                joint_name_to_norm_mode=joint_name_to_norm_mode,
+                motor_id_to_schema_joint=motor_id_to_schema_joint,
+                fps=CONTROL_RATE_HZ,
+            )
+        except Exception:
+            if status_tracker:
+                status_tracker.increment_errors()
+
     # Initialize last observation state per source (track normalized positions for threshold filtering)
     last_observation_leader: Dict[str, float] = {}
     last_observation_follower: Dict[str, float] = {}
@@ -409,23 +428,6 @@ def teleoperate(
 
     # TimeReference synchronization: teleop loop runs at 100Hz for control and MQTT updates.
     status_tracker.fps = CONTROL_RATE_HZ
-
-    try:
-        if robot is not None and mqtt_client is not None:
-            publish_initial_observations(
-                leader=leader,
-                follower=follower,
-                robot=robot,
-                mqtt_client=mqtt_client,
-                leader_calibration=leader_calibration,
-                follower_calibration=follower_calibration,
-                joint_name_to_norm_mode=joint_name_to_norm_mode,
-                motor_id_to_schema_joint=motor_id_to_schema_joint,
-                fps=CONTROL_RATE_HZ,
-            )
-    except Exception:
-        if status_tracker:
-            status_tracker.increment_errors()
 
     try:
         if leader is not None:
