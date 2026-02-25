@@ -199,7 +199,12 @@ def _discover_cameras_for_so101(so101_uuid: str) -> list[dict]:
 
 
 def _ensure_setup(twin_uuid: str) -> None:
-    """Bootstrap setup.json from twin JSONs (attach_to_twin_uuid). Uses edge-core files."""
+    """Bootstrap setup.json from twin JSONs (attach_to_twin_uuid). Uses edge-core files.
+
+    On startup, discovers SO101 devices on serial ports (/dev/ttyACM*, /dev/ttyUSB* on Linux,
+    /dev/tty.usbmodem* on macOS), runs voltage detection, and assigns leader (lower voltage)
+    and follower (higher voltage). Updates setup.json with discovered ports.
+    """
     from scripts.cw_setup import (
         _parse_resolution,
         create_setup_config,
@@ -207,9 +212,17 @@ def _ensure_setup(twin_uuid: str) -> None:
         save_setup_config,
     )
     from utils.config import get_setup_config_path
+    from utils.utils import discover_so101_ports_by_voltage
 
     path = get_setup_config_path()
     existing = load_setup_config(path) if path.exists() else {}
+
+    # Discover SO101 ports by voltage (lower=leader, higher=follower)
+    discovered = discover_so101_ports_by_voltage()
+    if discovered.get("leader_port"):
+        existing["leader_port"] = discovered["leader_port"]
+    if discovered.get("follower_port"):
+        existing["follower_port"] = discovered["follower_port"]
 
     cameras = _discover_cameras_for_so101(twin_uuid)
     wrist_cam = next((c for c in cameras if "wrist" in (c.get("attach_to_link") or "").lower()), None)
@@ -224,7 +237,7 @@ def _ensure_setup(twin_uuid: str) -> None:
         additional_camera_id=add_cams[0].get("camera_id", 1) if add_cams else 1,
         additional_camera_twin_uuid=str(add_cams[0].get("twin_uuid")) if add_cams else None,
     )
-    # Merge with existing (ports from calibrate)
+    # Merge with existing (ports from discovery or calibrate, max_relative_target, camera_fps)
     for k in ("leader_port", "follower_port", "max_relative_target", "camera_fps"):
         if existing.get(k) is not None:
             config[k] = existing[k]

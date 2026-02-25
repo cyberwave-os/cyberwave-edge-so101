@@ -614,6 +614,89 @@ def detect_voltage_rating(port: str, motor_id: int = 1, baudrate: int = 1000000)
                 pass
 
 
+def _find_so101_candidate_ports() -> List[str]:
+    """
+    Find serial ports that may be SO101 devices.
+
+    - Linux: /dev/ttyACM*, /dev/ttyUSB*
+    - macOS: /dev/tty.usbmodem*
+
+    Returns sorted list of port paths.
+    """
+    candidates: List[str] = []
+    dev = Path("/dev")
+    if not dev.exists():
+        return []
+
+    system = platform.system()
+    if system == "Linux":
+        for pattern in ("ttyACM*", "ttyUSB*"):
+            candidates.extend(str(p) for p in dev.glob(pattern) if p.exists())
+    elif system == "Darwin":
+        for p in dev.glob("tty.usbmodem*"):
+            if p.exists():
+                candidates.append(str(p))
+    else:
+        # Fallback: use find_available_ports and filter for common USB patterns
+        all_ports = find_available_ports()
+        for port in all_ports:
+            name = Path(port).name
+            if "usbmodem" in name or "ttyACM" in name or "ttyUSB" in name:
+                candidates.append(port)
+
+    return sorted(set(candidates))
+
+
+def discover_so101_ports_by_voltage(
+    baudrate: int = 1000000,
+) -> Dict[str, Optional[str]]:
+    """
+    Discover SO101 devices on serial ports and assign leader/follower by voltage.
+
+    - Scans /dev/ttyACM* and /dev/ttyUSB* (Linux) or /dev/tty.usbmodem* (macOS)
+    - Runs voltage detection on each port
+    - Lower voltage (5V) = leader, higher voltage (12V) = follower
+
+    Returns:
+        {"leader_port": str|None, "follower_port": str|None}
+    """
+    candidates = _find_so101_candidate_ports()
+    if not candidates:
+        logger.debug("No SO101 candidate ports found")
+        return {"leader_port": None, "follower_port": None}
+
+    detected: List[Tuple[str, int]] = []
+    for port in candidates:
+        voltage = detect_voltage_rating(port, baudrate=baudrate)
+        if voltage in (5, 12):
+            detected.append((port, voltage))
+            logger.debug("SO101 on %s: %dV", port, voltage)
+
+    if not detected:
+        logger.debug("No SO101 devices with detectable voltage on %s", candidates)
+        return {"leader_port": None, "follower_port": None}
+
+    # Sort by voltage: lower = leader, higher = follower
+    detected.sort(key=lambda x: x[1])
+
+    leader_port = None
+    follower_port = None
+    for port, voltage in detected:
+        if voltage == 5:
+            leader_port = port
+        elif voltage == 12:
+            follower_port = port
+
+    if leader_port or follower_port:
+        logger.info(
+            "SO101 ports: leader=%s, follower=%s",
+            leader_port,
+            follower_port,
+        )
+
+    return {"leader_port": leader_port, "follower_port": follower_port}
+
+
 def get_cyberwave_controller(token: str, twin_uuid: str) -> EdgeController:
     client = cw(token=token)
     controller = client.controller(twin_uuid=twin_uuid)
