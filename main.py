@@ -160,7 +160,7 @@ def _load_all_twin_jsons() -> list[dict]:
         return []
     result: list[dict] = []
     for p in config_dir.glob("*.json"):
-        if p.name in ("credentials.json", "environment.json", "fingerprint.json"):
+        if p.name in ("credentials.json", "environment.json", "fingerprint.json", "cameras.json"):
             continue
         try:
             uuid_module.UUID(p.stem)
@@ -187,11 +187,14 @@ def _discover_cameras_for_so101(so101_uuid: str) -> list[dict]:
         asset = t.get("asset") or {}
         reg = (asset.get("registry_id") or asset.get("metadata", {}).get("registry_id") or "").lower()
         cam_type = "realsense" if "realsense" in reg else "cv2"
+        meta = t.get("metadata") or {}
+        video_device = (meta.get("video_device") or "").strip() or None
         attached.append({
             "twin_uuid": t.get("uuid"),
             "attach_to_link": t.get("attach_to_link", ""),
             "camera_type": cam_type,
             "camera_id": 0 if "wrist" in (t.get("attach_to_link") or "").lower() else 1,
+            "video_device": video_device,
         })
     # Sort: wrist first (attach_to_link contains "wrist"), then others
     attached.sort(key=lambda c: (0 if "wrist" in (c.get("attach_to_link") or "").lower() else 1, c.get("twin_uuid", "")))
@@ -205,6 +208,10 @@ def _ensure_setup(twin_uuid: str) -> None:
     /dev/tty.usbmodem* on macOS), runs voltage detection, and assigns leader (lower voltage)
     and follower (higher voltage). Updates setup.json with discovered ports.
     """
+    from utils.utils import ensure_video_device_permissions
+
+    ensure_video_device_permissions()
+
     from scripts.cw_setup import (
         _parse_resolution,
         create_setup_config,
@@ -228,13 +235,18 @@ def _ensure_setup(twin_uuid: str) -> None:
     wrist_cam = next((c for c in cameras if "wrist" in (c.get("attach_to_link") or "").lower()), None)
     add_cams = [c for c in cameras if c != wrist_cam]
 
+    def _camera_id(cam: dict | None) -> int | str:
+        if not cam:
+            return 0
+        return cam.get("video_device") or cam.get("camera_id", 0)
+
     config = create_setup_config(
         twin_uuid=twin_uuid,
         wrist_camera=bool(wrist_cam),
         wrist_camera_twin_uuid=twin_uuid if wrist_cam else None,
-        wrist_camera_id=wrist_cam.get("camera_id", 0) if wrist_cam else 0,
+        wrist_camera_id=_camera_id(wrist_cam),
         additional_camera_type=add_cams[0].get("camera_type", "cv2") if add_cams else None,
-        additional_camera_id=add_cams[0].get("camera_id", 1) if add_cams else 1,
+        additional_camera_id=_camera_id(add_cams[0]) if add_cams else 1,
         additional_camera_twin_uuid=str(add_cams[0].get("twin_uuid")) if add_cams else None,
     )
     # Merge with existing (ports from discovery or calibrate, max_relative_target, camera_fps)
@@ -246,7 +258,7 @@ def _ensure_setup(twin_uuid: str) -> None:
         res = _parse_resolution("VGA")
         config["additional_cameras"].append({
             "camera_type": add_cams[1].get("camera_type", "cv2"),
-            "camera_id": add_cams[1].get("camera_id", 2),
+            "camera_id": add_cams[1].get("video_device") or add_cams[1].get("camera_id", 2),
             "camera_name": "external2",
             "twin_uuid": str(add_cams[1].get("twin_uuid", "")),
             "fps": config.get("camera_fps", 30),

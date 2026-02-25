@@ -3,6 +3,7 @@
 import json
 import logging
 import math
+import os
 import platform
 import time
 from pathlib import Path
@@ -16,6 +17,26 @@ from cyberwave.sensor import Resolution
 from motors import MotorNormMode
 
 logger = logging.getLogger(__name__)
+
+
+def ensure_video_device_permissions() -> None:
+    """Set read/write permissions on /dev/video* so cameras can be accessed.
+
+    When a USB camera is plugged in, device nodes may have restrictive permissions.
+    Attempts chmod 666 on each /dev/video* device. Requires root. On failure, logs a hint.
+    """
+    dev = Path("/dev")
+    if not dev.exists():
+        return
+    try:
+        for path in dev.glob("video*"):
+            if path.is_char_device():
+                os.chmod(path, 0o666)
+    except PermissionError:
+        logger.warning(
+            "Cannot set permissions on /dev/video* (need root). "
+            "Run: sudo chmod 666 /dev/video* to allow camera access."
+        )
 
 
 def setup_logging(level: int = logging.INFO) -> None:
