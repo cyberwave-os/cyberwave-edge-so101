@@ -33,7 +33,7 @@ from utils.cw_remoteoperate_helpers import (
 )
 from utils.cw_teleoperate_helpers import (
     get_teleoperate_parser,
-    publish_initial_follower_observation,
+    publish_initial_observations,
 )
 from utils.cw_update_worker import cyberwave_update_worker, process_cyberwave_updates
 from utils.cw_utils import build_joint_mappings, resolve_calibration_for_edge
@@ -110,7 +110,7 @@ def teleop_loop(
                     action=follower_obs,
                     last_observation=last_observation_follower,
                     action_queue=action_queue,
-                    position_threshold=position_threshold,
+                    position_threshold=0.05,
                     timestamp=timestamp,
                     status_tracker=status_tracker,
                     last_send_times=last_send_times_follower,
@@ -260,6 +260,11 @@ def teleoperate(
     motors_for_mapping = follower.motors
 
     # Resolve calibration: prefer local device, fallback to twin API
+    leader_calibration = resolve_calibration_for_edge(
+        robot,
+        leader.calibration,
+        "leader",
+    )
     follower_calibration = resolve_calibration_for_edge(
         robot,
         follower.calibration,
@@ -406,20 +411,16 @@ def teleoperate(
     status_tracker.fps = CONTROL_RATE_HZ
 
     try:
-        if (
-            follower is not None
-            and robot is not None
-            and mqtt_client is not None
-            and time_reference is not None
-        ):
-            publish_initial_follower_observation(
+        if robot is not None and mqtt_client is not None:
+            publish_initial_observations(
+                leader=leader,
                 follower=follower,
                 robot=robot,
                 mqtt_client=mqtt_client,
+                leader_calibration=leader_calibration,
                 follower_calibration=follower_calibration,
                 joint_name_to_norm_mode=joint_name_to_norm_mode,
                 motor_id_to_schema_joint=motor_id_to_schema_joint,
-                fps=CONTROL_RATE_HZ,
             )
     except Exception:
         if status_tracker:

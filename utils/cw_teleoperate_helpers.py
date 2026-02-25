@@ -8,6 +8,7 @@ import threading
 import time
 from typing import Any, Dict, Optional
 
+from cyberwave.constants import SOURCE_TYPE_EDGE_FOLLOWER, SOURCE_TYPE_EDGE_LEADER
 from cyberwave.utils import TimeReference
 
 from motors import MotorNormMode
@@ -124,37 +125,79 @@ def teleop_loop(
     return total_update_count, total_skip_count
 
 
-def publish_initial_follower_observation(
-    follower: SO101Follower,
+def _obs_to_schema_joints(
+    obs: Dict[str, float],
+    motors: Dict[str, Any],
+    calibration: Optional[Dict[str, Any]],
+    joint_name_to_norm_mode: Dict[str, MotorNormMode],
+    motor_id_to_schema_joint: Dict[int, str],
+) -> Dict[str, float]:
+    """Convert observation to schema joint names with positions in radians."""
+    result = {}
+    for joint_key, normalized_pos in obs.items():
+        name = joint_key.removesuffix(".pos")
+        if name not in motors:
+            continue
+        joint_index = motors[name].id
+        norm_mode = joint_name_to_norm_mode.get(name, MotorNormMode.RANGE_M100_100)
+        calib = calibration.get(name) if calibration else None
+        radians = normalized_to_radians(normalized_pos, norm_mode, calib)
+        schema_joint = motor_id_to_schema_joint.get(joint_index, f"_{joint_index}")
+        result[schema_joint] = radians
+    return result
+
+
+def publish_initial_observations(
+    leader: Optional[SO101Leader],
+    follower: Optional[SO101Follower],
     robot: Any,
     mqtt_client: Any,
+    leader_calibration: Optional[Dict[str, Any]],
     follower_calibration: Optional[Dict[str, Any]],
     joint_name_to_norm_mode: Dict[str, MotorNormMode],
     motor_id_to_schema_joint: Dict[int, str],
-    fps: int = 100,
 ) -> None:
     """
-    Convert follower observation to schema joint format and publish to Cyberwave.
+    Publish initial observations for both leader and follower to Cyberwave.
 
-    Uses calibration to convert normalized positions to radians, and motor_id_to_schema_joint
-    to map SO101 joints to twin schema names (e.g. "_1", "_2").
+    Each source is published with its source_type in the MQTT metadata (edge_leader,
+    edge_follower) so telemetry can distinguish them.
     """
-    follower_obs = follower.get_observation()
-    observations = {}
-    for joint_key, normalized_pos in follower_obs.items():
-        name = joint_key.removesuffix(".pos")
-        if name not in follower.motors:
-            continue
-        joint_index = follower.motors[name].id
-        norm_mode = joint_name_to_norm_mode.get(name, MotorNormMode.RANGE_M100_100)
+    twin_uuid = str(robot.uuid)
+    timestamp = time.time()
 
-        calib = follower_calibration.get(name) if follower_calibration else None
-        radians = normalized_to_radians(normalized_pos, norm_mode, calib)
-        schema_joint = motor_id_to_schema_joint.get(joint_index, f"_{joint_index}")
-        observations[schema_joint] = radians
+    if leader is not None:
+        leader_obs = leader.get_observation()
+        leader_joints = _obs_to_schema_joints(
+            leader_obs,
+            leader.motors,
+            leader_calibration,
+            joint_name_to_norm_mode,
+            motor_id_to_schema_joint,
+        )
+        for schema_joint, position in leader_joints.items():
+            mqtt_client.update_joint_state(
+                twin_uuid=twin_uuid,
+                joint_name=schema_joint,
+                position=position,
+                timestamp=timestamp,
+                source_type=SOURCE_TYPE_EDGE_LEADER,
+            )
 
-    mqtt_client.publish_initial_observation(
-        twin_uuid=robot.uuid,
-        observations=observations,
-        fps=fps,
-    )
+    if follower is not None:
+        follower_obs = follower.get_observation()
+        follower_joints = _obs_to_schema_joints(
+            follower_obs,
+            follower.motors,
+            follower_calibration,
+            joint_name_to_norm_mode,
+            motor_id_to_schema_joint,
+        )
+        for schema_joint, position in follower_joints.items():
+            mqtt_client.update_joint_state(
+                twin_uuid=twin_uuid,
+                joint_name=schema_joint,
+                position=position,
+                timestamp=timestamp,
+                source_type=SOURCE_TYPE_EDGE_FOLLOWER,
+            )
