@@ -524,18 +524,20 @@ def find_port() -> str:
         raise OSError(f"Could not detect the port. More than one port was found ({ports_diff}).")
 
 
+# SO101 has 6 motors with IDs 1-6 (avoid importing so101.robot to prevent circular deps)
+_SO101_MOTOR_IDS = [1, 2, 3, 4, 5, 6]
+
+
 def detect_voltage_rating(port: str, motor_id: int = 1, baudrate: int = 1000000) -> Optional[int]:
     """
     Attempt to detect the voltage rating (5V or 12V) from the device.
 
-    This function tries to infer the voltage rating from:
-    1. Voltage limit registers (MAX_LIMIT_VOLTAGE, MIN_LIMIT_VOLTAGE)
-    2. Present voltage reading (if device is powered)
-    3. Model number (if it encodes voltage information)
+    Reads present voltage from each SO101 motor (IDs 1-6), averages the readings,
+    and classifies: avg < 8V → 5V, avg >= 8V → 12V. Same approach as cw_read_device.
 
     Args:
         port: Serial port path
-        motor_id: Motor ID to read from (default: 1)
+        motor_id: Ignored; reads all SO101 motors for robustness
         baudrate: Serial communication baudrate
 
     Returns:
@@ -547,11 +549,7 @@ def detect_voltage_rating(port: str, motor_id: int = 1, baudrate: int = 1000000)
         logger.warning("scservo_sdk not available, cannot detect voltage rating")
         return None
 
-    from motors.tables import (
-        ADDR_MAX_VOLTAGE_LIMIT,
-        ADDR_MIN_VOLTAGE_LIMIT,
-        ADDR_PRESENT_VOLTAGE,
-    )
+    from motors.tables import ADDR_MAX_VOLTAGE_LIMIT, ADDR_PRESENT_VOLTAGE
 
     port_handler = None
     try:
@@ -562,49 +560,50 @@ def detect_voltage_rating(port: str, motor_id: int = 1, baudrate: int = 1000000)
             return None
 
         packet_handler = PacketHandler(1.0)
+        voltages: List[float] = []
+        max_voltages: List[float] = []
 
-        # Try reading voltage limits
-        try:
-            max_voltage, result, error = packet_handler.read1ByteTxRx(
-                port_handler, motor_id, ADDR_MAX_VOLTAGE_LIMIT[0]
-            )
-            min_voltage, result2, error2 = packet_handler.read1ByteTxRx(
-                port_handler, motor_id, ADDR_MIN_VOLTAGE_LIMIT[0]
-            )
+        for mid in _SO101_MOTOR_IDS:
+            try:
+                # Present voltage (address 62, 0.1V units)
+                present_raw, result, _ = packet_handler.read1ByteTxRx(
+                    port_handler, mid, ADDR_PRESENT_VOLTAGE[0]
+                )
+                if result == 0:
+                    voltages.append(present_raw / 10.0)
 
-            if result == 0 and result2 == 0:
-                # Voltage limits are in 0.1V units
-                max_v = max_voltage / 10.0
+                # Max voltage limit as fallback (address 14)
+                max_raw, result, _ = packet_handler.read1ByteTxRx(
+                    port_handler, mid, ADDR_MAX_VOLTAGE_LIMIT[0]
+                )
+                if result == 0:
+                    max_voltages.append(max_raw / 10.0)
+            except Exception:
+                continue
 
-                # 5V servos typically have limits around 4.5-6.5V
-                # 12V servos typically have limits around 10-14V
-                if max_v < 8.0:
-                    return 5
-                elif max_v > 8.0:
-                    return 12
-        except Exception:
-            pass
+        if not voltages and not max_voltages:
+            return None
 
-        # Try reading present voltage as a hint
-        try:
-            present_voltage, result, error = packet_handler.read1ByteTxRx(
-                port_handler, motor_id, ADDR_PRESENT_VOLTAGE[0]
-            )
-            if result == 0:
-                voltage = present_voltage / 10.0
-                # If voltage is between 4-78, likely 5V system
-                # If voltage is between 10-14V, likely 12V system
-                if 4.0 <= voltage <= 8.0:
-                    return 5
-                elif 10.0 <= voltage <= 14.0:
-                    return 12
-        except Exception:
-            pass
+        # Prefer present voltage average (more reliable when powered)
+        if voltages:
+            avg = sum(voltages) / len(voltages)
+            if 4.0 <= avg <= 8.0:
+                return 5
+            if 10.0 <= avg <= 14.0:
+                return 12
+
+        # Fallback: max voltage limit average (5V: typically < 8, 12V: typically > 8)
+        if max_voltages:
+            avg_max = sum(max_voltages) / len(max_voltages)
+            if avg_max < 8.0:
+                return 5
+            if avg_max > 8.0:
+                return 12
 
         return None
 
     except Exception as e:
-        logger.debug(f"Error detecting voltage rating: {e}")
+        logger.debug("Error detecting voltage rating: %s", e)
         return None
     finally:
         if port_handler:
