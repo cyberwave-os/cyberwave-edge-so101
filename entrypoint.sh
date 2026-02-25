@@ -31,4 +31,9 @@ export_vars(data)
 ")"
 fi
 
+# Ensure CYBERWAVE_EDGE_CONFIG_DIR is set (edge-core passes this)
+if [ -z "$CYBERWAVE_EDGE_CONFIG_DIR" ]; then
+    export CYBERWAVE_EDGE_CONFIG_DIR="/app/.cyberwave"
+fi
+
 exec python main.py "$@"
