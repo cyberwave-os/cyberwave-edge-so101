@@ -51,7 +51,8 @@ def teleop_loop(
     follower: Optional[SO101Follower],
     action_queue: queue.Queue,
     stop_event: threading.Event,
-    last_observation: Dict[str, float],
+    last_observation_leader: Dict[str, float],
+    last_observation_follower: Dict[str, float],
     position_threshold: float,
     time_reference: TimeReference,
     status_tracker: Optional[StatusTracker] = None,
@@ -62,10 +63,13 @@ def teleop_loop(
     Main teleoperation loop: read from leader, send to follower, send data to Cyberwave.
 
     The loop always runs at 100Hz for responsive robot control and MQTT updates.
+    Leader and follower observations are each threshold-filtered against their own
+    previous values before sending to Cyberwave.
     """
     total_update_count = 0
     total_skip_count = 0
-    last_send_times: Dict[str, float] = {}
+    last_send_times_leader: Dict[str, float] = {}
+    last_send_times_follower: Dict[str, float] = {}
     control_frame_time = 1.0 / control_rate_hz
 
     try:
@@ -84,17 +88,18 @@ def teleop_loop(
                     if status_tracker:
                         status_tracker.increment_errors()
 
-            # Send both leader and follower observations to Cyberwave (when both exist)
+            # Send both leader and follower observations to Cyberwave (when both exist).
+            # Each is threshold-filtered against its own previous values.
             update_count, skip_count = 0, 0
             if leader_obs:
                 uc, sc = process_cyberwave_updates(
                     action=leader_obs,
-                    last_observation=last_observation,
+                    last_observation=last_observation_leader,
                     action_queue=action_queue,
                     position_threshold=position_threshold,
                     timestamp=timestamp,
                     status_tracker=status_tracker,
-                    last_send_times=last_send_times,
+                    last_send_times=last_send_times_leader,
                     heartbeat_interval=heartbeat_interval,
                     source_type=SOURCE_TYPE_EDGE_LEADER,
                 )
@@ -103,12 +108,12 @@ def teleop_loop(
             if follower_obs and follower is not None and follower_obs is not leader_obs:
                 uc, sc = process_cyberwave_updates(
                     action=follower_obs,
-                    last_observation=last_observation,
+                    last_observation=last_observation_follower,
                     action_queue=action_queue,
                     position_threshold=position_threshold,
                     timestamp=timestamp,
                     status_tracker=status_tracker,
-                    last_send_times=last_send_times,
+                    last_send_times=last_send_times_follower,
                     heartbeat_interval=heartbeat_interval,
                     source_type=SOURCE_TYPE_EDGE_FOLLOWER,
                 )
@@ -271,10 +276,12 @@ def teleoperate(
     joint_index_to_name_str = {str(mid): name for mid, name in joint_index_to_name.items()}
     status_tracker.set_joint_index_to_name(joint_index_to_name_str)
 
-    # Initialize last observation state (track normalized positions)
-    last_observation: Dict[str, float] = {}
+    # Initialize last observation state per source (track normalized positions for threshold filtering)
+    last_observation_leader: Dict[str, float] = {}
+    last_observation_follower: Dict[str, float] = {}
     for joint_name in motors_for_mapping.keys():
-        last_observation[joint_name] = float("inf")  # Use inf to force first update
+        last_observation_leader[joint_name] = float("inf")  # Use inf to force first update
+        last_observation_follower[joint_name] = float("inf")
 
     # Create queue and worker thread for Cyberwave updates
     num_joints = len(motors_for_mapping)
@@ -425,7 +432,8 @@ def teleoperate(
                 follower=follower,
                 action_queue=action_queue,
                 stop_event=stop_event,
-                last_observation=last_observation,
+                last_observation_leader=last_observation_leader,
+                last_observation_follower=last_observation_follower,
                 position_threshold=position_threshold,
                 time_reference=time_reference,
                 status_tracker=status_tracker,
