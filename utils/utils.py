@@ -687,6 +687,26 @@ def discover_so101_ports_by_voltage(
         elif voltage == 12:
             follower_port = port
 
+    # Infer missing role when we have 2 ports but voltage detection failed on one
+    detected_ports = {p for p, _ in detected}
+    undetected = [p for p in candidates if p not in detected_ports]
+    if len(candidates) == 2 and len(undetected) == 1:
+        other_port = undetected[0]
+        if leader_port is None and follower_port:
+            leader_port = other_port
+            logger.info(
+                "Leader port inferred from undetected port %s (follower on %s)",
+                other_port,
+                follower_port,
+            )
+        elif follower_port is None and leader_port:
+            follower_port = other_port
+            logger.info(
+                "Follower port inferred from undetected port %s (leader on %s)",
+                other_port,
+                leader_port,
+            )
+
     if leader_port or follower_port:
         logger.info(
             "SO101 ports: leader=%s, follower=%s",

@@ -11,7 +11,7 @@ import sys
 import time
 from typing import Dict, List, Optional
 
-from so101.leader import SO101_LEADER_MOTORS
+from so101.robot import SO101_MOTORS
 from utils.utils import (
     detect_voltage_rating,
     find_available_ports,
@@ -365,8 +365,8 @@ def main():
         print(f"Invalid motor IDs: {args.motor_ids}", file=sys.stderr)
         sys.exit(1)
 
-    # Create motor name mapping from SO101_LEADER_MOTORS
-    motor_names = {motor.id: name for name, motor in SO101_LEADER_MOTORS.items()}
+    # Create motor name mapping from SO101_MOTORS
+    motor_names = {motor.id: name for name, motor in SO101_MOTORS.items()}
 
     # Detect or use specified voltage rating
     voltage_rating = args.voltage_rating
