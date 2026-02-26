@@ -63,13 +63,28 @@ def _trigger_alert_and_switch_to_calibration(
     )
     logger.info("Created calibration alert %s for twin %s", alert.uuid, twin_uuid)
 
-    # TODO:Notify the system that we are switching to calibration mode
-    # client.mqtt.publish_command_message(twin_uuid, "calibrating")
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        logger.warning(
+            "Non-interactive mode: calibration requires TTY. "
+            "Run: docker exec -it <container> python -m scripts.cw_calibrate "
+            "--type follower --port %s --id %s",
+            follower_port,
+            follower_id,
+        )
+        alert.update(
+            severity="warning",
+            description=(
+                "Calibration requires interactive mode. "
+                "SSH into the device and run: python -m scripts.cw_calibrate "
+                f"--type follower --port {follower_port} --id {follower_id}"
+            ),
+        )
+        client.mqtt.publish_command_message(twin_uuid, "error")
+        return
 
     try:
         import subprocess
 
-        # Run the calibration script as a subprocess
         calibrate_cmd = [
             sys.executable,
             "-m",
@@ -86,7 +101,13 @@ def _trigger_alert_and_switch_to_calibration(
         result = subprocess.run(calibrate_cmd)
 
         if result.returncode != 0:
-            raise RuntimeError(f"Calibration subprocess exited with code {result.returncode}")
+            logger.error("Calibration subprocess exited with code %s", result.returncode)
+            alert.update(
+                severity="error",
+                description="Automatic calibration failed. Please calibrate manually.",
+            )
+            client.mqtt.publish_command_message(twin_uuid, "error")
+            return
 
         logger.info("Calibration completed for follower %s", follower_id)
 
@@ -108,9 +129,13 @@ def _trigger_alert_and_switch_to_calibration(
             result = subprocess.run(leader_cmd)
 
             if result.returncode != 0:
-                raise RuntimeError(
-                    f"Leader calibration subprocess exited with code {result.returncode}"
+                logger.error("Leader calibration subprocess exited with code %s", result.returncode)
+                alert.update(
+                    severity="error",
+                    description="Leader calibration failed. Please calibrate manually.",
                 )
+                client.mqtt.publish_command_message(twin_uuid, "error")
+                return
 
             logger.info("Calibration completed for leader %s", leader_id)
 
@@ -120,13 +145,11 @@ def _trigger_alert_and_switch_to_calibration(
 
     except Exception:
         logger.exception("Calibration failed for follower %s", follower_id)
-        # Update the alert to reflect the failure
         alert.update(
             severity="error",
             description="Automatic calibration failed. Please calibrate manually.",
         )
         client.mqtt.publish_command_message(twin_uuid, "error")
-        raise
 
 
 def _is_follower_calibrated(follower_id: str = "follower1") -> bool:
@@ -718,8 +741,10 @@ async def main() -> None:
 
     logger.info("Initializing SO101 edge node for twin %s", twin_uuid)
 
-    # Ensure setup.json exists (bootstrap via cw_setup if missing; uses edge-core mount)
-    _ensure_setup(twin_uuid)
+    try:
+        _ensure_setup(twin_uuid)
+    except Exception:
+        logger.exception("Setup bootstrap failed; continuing with existing config")
 
     # Initialize the Cyberwave SDK client (reads remaining config from env vars)
     client = Cyberwave(token=token, source_type="edge")
@@ -751,7 +776,10 @@ async def main() -> None:
             handle_command(client, twin_uuid, command, data)
         except Exception:
             logger.exception("Error handling command %s", command)
-            client.mqtt.publish_command_message(twin_uuid, "error")
+            try:
+                client.mqtt.publish_command_message(twin_uuid, "error")
+            except Exception:
+                logger.exception("Failed to publish error status")
 
     # Subscribe to the command topic for this twin
     client.mqtt.subscribe_command_message(twin_uuid, on_command)
@@ -781,4 +809,10 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Shutdown by user")
+    except Exception:
+        logger.exception("Fatal error in main loop")
+        sys.exit(0)  # Exit 0 to avoid Docker restart loop
