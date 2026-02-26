@@ -476,7 +476,7 @@ def main():
                     "camera_id": setup_config.get("wrist_camera_id", 0),
                     "camera_type": "cv2",
                     "camera_resolution": wrist_res_enum,
-                    "camera_name": setup_config.get("wrist_camera_name", "wrist_camera"),
+                    # camera_name omitted: SDK infers from twin.capabilities.sensors for correct Redis key
                     "fps": wrist_fps,
                     "fourcc": setup_config.get("wrist_camera_fourcc"),
                     "keyframe_interval": setup_config.get("wrist_camera_keyframe_interval"),
@@ -509,7 +509,7 @@ def main():
                     "camera_id": add.get("camera_id", 1),
                     "camera_type": add.get("camera_type", "cv2"),
                     "camera_resolution": cam_res,
-                    "camera_name": add.get("camera_name", "external"),
+                    # camera_name omitted: SDK infers from twin.capabilities.sensors for correct Redis key
                     "fps": add.get("fps", 30),
                     "fourcc": add.get("fourcc"),
                     "enable_depth": add.get("enable_depth", False),
