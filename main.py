@@ -464,13 +464,46 @@ def _run_script_command(
         client.mqtt.publish_command_message(twin_uuid, "error")
 
 
+def _handle_controller_changed(
+    client: Cyberwave, twin_uuid: str, payload: dict
+) -> None:
+    """React to controller-changed: start teleoperate for localop, remoteoperate otherwise."""
+    controller = payload.get("controller")
+    if not controller or not isinstance(controller, dict):
+        logger.info("Controller cleared; stopping current operation")
+        _stop_current_operation()
+        client.mqtt.publish_command_message(twin_uuid, "ok")
+        return
+
+    controller_type = (controller.get("controller_type") or "").strip().lower()
+    logger.info("Controller changed to type=%s, starting corresponding operation", controller_type)
+
+    _stop_current_operation()
+    try:
+        if controller_type == "localop":
+            start_teleoperate(client, twin_uuid)
+        else:
+            start_remoteoperate(client, twin_uuid)
+    except Exception:
+        logger.exception("Failed to start operation for controller type %s", controller_type)
+        client.mqtt.publish_command_message(twin_uuid, "error")
+
+
 def handle_command(client: Cyberwave, twin_uuid: str, command: str, payload: dict) -> None:
     """Dispatch command to the corresponding so101-* script or operation.
 
     Payload may include:
     - data: dict of named args for the script
     - args: dict of additional args (merged with data, args override data)
+
+    Special command "controller-changed": sent by backend when twin's controller
+    policy changes. Starts teleoperate for "localop", remoteoperate otherwise.
     """
+    # Handle controller-changed from backend (PUT /twins/{uuid} with new controller)
+    if command == "controller-changed":
+        _handle_controller_changed(client, twin_uuid, payload)
+        return
+
     # Normalize: accept "so101-remoteoperate" or "remoteoperate"
     cmd = command.removeprefix("so101-") if isinstance(command, str) else ""
     if not cmd or cmd not in SUPPORTED_COMMANDS:
