@@ -161,14 +161,16 @@ class SO101Follower(SO101Robot):
             for motor in self.motors:
                 self.bus.write("Operating_Mode", motor, MODE_POSITION)
 
-            # Set PID coefficients to reduce shakiness
-            # P_Coefficient: lower value to avoid shakiness (Default is 32, we use 16)
-            # I_Coefficient: default 0
-            # D_Coefficient: default 32
+            # Set PID coefficients
             for motor in self.motors:
                 self.bus.write("P_Coefficient", motor, 16)
                 self.bus.write("I_Coefficient", motor, 0)
                 self.bus.write("D_Coefficient", motor, 32)
+
+                if motor == "gripper":
+                    self.bus.write("Max_Torque_Limit", motor, 500)
+                    self.bus.write("Protection_Current", motor, 250)
+                    self.bus.write("Overload_Torque", motor, 25)
 
         finally:
             # Re-enable torque if it was enabled before
@@ -262,7 +264,6 @@ class SO101Follower(SO101Robot):
             # Return last known positions if available, otherwise empty dict
             # Don't mark as disconnected - this could be a transient error
             return self._current_positions if self._current_positions else {}
-
 
     @property
     def torque_enabled(self) -> bool:
