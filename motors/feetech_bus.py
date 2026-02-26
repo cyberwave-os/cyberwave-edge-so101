@@ -17,12 +17,15 @@ from .tables import (
     ADDR_HOMING_OFFSET,
     ADDR_I_COEFFICIENT,
     ADDR_MAX_POSITION_LIMIT,
+    ADDR_MAX_TORQUE_LIMIT,
     ADDR_MIN_POSITION_LIMIT,
     ADDR_OPERATING_MODE,
+    ADDR_OVERLOAD_TORQUE,
     ADDR_P_COEFFICIENT,
     ADDR_PRESENT_LOAD,
     ADDR_PRESENT_POSITION,
     ADDR_PRESENT_VELOCITY,
+    ADDR_PROTECTION_CURRENT,
     ADDR_TORQUE_ENABLE,
     ENCODING_BIT_HOMING_OFFSET,
     ENCODING_BIT_VELOCITY,
@@ -772,6 +775,9 @@ class FeetechMotorsBus(MotorsBus):
             "P_Coefficient": ADDR_P_COEFFICIENT,
             "I_Coefficient": ADDR_I_COEFFICIENT,
             "D_Coefficient": ADDR_D_COEFFICIENT,
+            "Max_Torque_Limit": ADDR_MAX_TORQUE_LIMIT,
+            "Protection_Current": ADDR_PROTECTION_CURRENT,
+            "Overload_Torque": ADDR_OVERLOAD_TORQUE,
         }
 
         if register_name not in register_map:
@@ -1122,23 +1128,41 @@ class FeetechMotorsBus(MotorsBus):
                     display_text = self._format_calibration_display(
                         motor_names, current_positions, range_mins, range_maxes
                     )
-                    
+
                     # Check for invalid ranges and add warnings to display
                     warnings_text = ""
                     try:
-                        from utils.utils import validate_calibration_ranges, format_calibration_warnings
+                        from utils.utils import (
+                            format_calibration_warnings,
+                            validate_calibration_ranges,
+                        )
+
                         # Create temporary dicts with current values (replace inf with actual values for validation)
-                        temp_mins = {name: range_mins[name] if range_mins[name] != float("inf") else 0.0 for name in motor_names}
-                        temp_maxes = {name: range_maxes[name] if range_maxes[name] != float("-inf") else 4095.0 for name in motor_names}
-                        motors_dict = {name: self.motors[name] for name in motor_names if name in self.motors}
-                        
+                        temp_mins = {
+                            name: range_mins[name] if range_mins[name] != float("inf") else 0.0
+                            for name in motor_names
+                        }
+                        temp_maxes = {
+                            name: range_maxes[name]
+                            if range_maxes[name] != float("-inf")
+                            else 4095.0
+                            for name in motor_names
+                        }
+                        motors_dict = {
+                            name: self.motors[name] for name in motor_names if name in self.motors
+                        }
+
                         # Check if there are invalid ranges
                         if motors_dict:
-                            invalid_joints = validate_calibration_ranges(temp_mins, temp_maxes, motors_dict)
-                            
+                            invalid_joints = validate_calibration_ranges(
+                                temp_mins, temp_maxes, motors_dict
+                            )
+
                             # Format warnings text if invalid joints found (without action required for real-time display)
                             if invalid_joints:
-                                warnings_text = format_calibration_warnings(invalid_joints, motors_dict, include_action_required=False)
+                                warnings_text = format_calibration_warnings(
+                                    invalid_joints, motors_dict, include_action_required=False
+                                )
                     except ImportError:
                         pass  # Skip validation if utils not available
 
