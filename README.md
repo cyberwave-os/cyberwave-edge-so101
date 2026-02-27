@@ -38,37 +38,32 @@ cyberwave-edge-node:
 
 # Cyberwave SO101 Robot Library
 
-[![License: MIT](https://img.shields.io/github/license/cyberwave-os/cyberwave-edge-python-so101)](https://github.com/cyberwave-os/cyberwave-edge-python-so101/blob/main/LICENSE)
-[![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![GitHub stars](https://img.shields.io/github/stars/cyberwave-os/cyberwave-edge-python-so101)](https://github.com/cyberwave-os/cyberwave-edge-python-so101/stargazers)
-[![GitHub contributors](https://img.shields.io/github/contributors/cyberwave-os/cyberwave-edge-python-so101)](https://github.com/cyberwave-os/cyberwave-edge-python-so101/graphs/contributors)
-[![GitHub issues](https://img.shields.io/github/issues/cyberwave-os/cyberwave-edge-python-so101)](https://github.com/cyberwave-os/cyberwave-edge-python-so101/issues)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 
-A standalone Python library for operating SO101 leader and follower robots using `scservo_sdk` (Feetech) directly.
+A standalone Python library for operating SO101 leader and follower robots using `scservo_sdk` (Feetech) directly. Part of the [Cyberwave](https://cyberwave.com/) edge nodes.
 
 ## Features
 
-- **Motor Bus Layer**: Abstraction for Feetech STS3215 motor communication
-- **Leader/Follower Support**: Separate classes for leader (passive) and follower (active) devices
-- **Calibration System**: Interactive calibration with range-of-motion recording
-- **Teleoperation**: Real-time teleoperation loop with Cyberwave integration
-- **Camera Streaming**: Support for CV2 (USB/webcam/IP) and Intel RealSense cameras with WebRTC streaming
-- **Camera Configuration**: JSON-based camera configuration files for easy setup sharing
-- **Normalization Modes**: Support for `RANGE_M100_100`, `RANGE_0_100`, and `DEGREES` normalization
-- **Command-line Tools**: Easy-to-use scripts for common tasks
+- **Local teleoperation** — Control the follower with a physical leader arm (both connected locally)
+- **Remote operation** — Control the follower from anywhere via the Cyberwave web app
+- **Calibration** — Interactive calibration with range-of-motion recording
+- **Camera streaming** — CV2 (USB/webcam/IP) and Intel RealSense with WebRTC
+- **Edge Core integration** — Auto-discovers leader/follower ports (5V=leader, 12V=follower), cameras from twin JSONs, and starts the right mode from the controller policy
+- **CLI tools** — `so101-find-port`, `so101-calibrate`, `so101-teleoperate`, `so101-remoteoperate`
 
 ## Installation
 
 ### Prerequisites
 
 - Python 3.8 or higher
-- Serial port access to SO101 devices
+- Serial port access to SO101 devices (e.g. `/dev/ttyACM0`, `/dev/tty.usbmodem*` on macOS)
 
 ### Install from Source
 
 ```bash
-git clone https://github.com/cyberwave/cyberwave-edge-python-so101.git
-cd cyberwave-edge-python-so101
+git clone https://github.com/cyberwave/cyberwave.git
+cd cyberwave/cyberwave-edge-nodes/cyberwave-edge-so101
 pip install -e .
 ```
 
@@ -76,39 +71,28 @@ pip install -e .
 
 - `pyserial>=3.5` - Serial communication
 - `feetech-servo-sdk` - Feetech motor SDK
-- `cyberwave` - Cyberwave platform integration (for teleoperation)
-- `cyberwave[camera]` - Camera streaming support (CV2 cameras)
-- `cyberwave[realsense]` - Intel RealSense camera support (optional, install with `pip install cyberwave[realsense]`)
+- `cyberwave[camera]>=0.3.24` - Cyberwave platform integration and camera streaming (CV2 cameras)
+- `python-dotenv>=1.0.0` - Environment variable loading
+
+For Intel RealSense support, install `cyberwave[realsense]` separately.
 
 ### Environment Variables
 
-For Cyberwave integration, set the following environment variables:
-
 ```bash
 export CYBERWAVE_API_KEY=your_token_here
-export CYBERWAVE_ENVIRONMENT_ID=your_environment_uuid  # Optional
 ```
 
-You can add these to your `~/.bashrc` or `~/.zshrc` to make them persistent:
-
-```bash
-echo 'export CYBERWAVE_API_KEY=your_token_here' >> ~/.bashrc
-echo 'export CYBERWAVE_ENVIRONMENT_ID=your_environment_uuid' >> ~/.bashrc
-source ~/.bashrc
-```
+Required for teleoperation and remote operation. Add to `~/.bashrc` or `~/.zshrc` to make it persistent.
 
 ## Quick Start
 
-### 0. Set Up Environment Variables
-
-Before using Cyberwave integration, set your API token and optionally environment UUID:
+### 1. Set Up Environment
 
 ```bash
 export CYBERWAVE_API_KEY=your_token_here
-export CYBERWAVE_ENVIRONMENT_ID=your_environment_uuid  # Optional
 ```
 
-### 1. Find Device Port
+### 2. Find Device Port
 
 ```bash
 so101-find-port
@@ -116,72 +100,32 @@ so101-find-port
 
 This will interactively help you identify the serial port of your SO101 device.
 
-### 2. Read Device Data
+### 3. Read Device Data
 
 ```bash
 so101-read-device --port /dev/ttyACM0
 ```
 
-Or in continuous mode:
-
-```bash
-so101-read-device --port /dev/ttyACM0 --continuous
-```
-
-### 3. Calibrate Device
-
-Calibrate a leader device (ID defaults to `leader1` if not specified):
+### 4. Calibrate Device
 
 ```bash
 so101-calibrate --type leader --port /dev/ttyACM0
-```
-
-Calibrate a follower device (ID defaults to `follower1` if not specified):
-
-```bash
 so101-calibrate --type follower --port /dev/ttyACM1
 ```
 
-Or specify a custom ID:
+### 5. Teleoperate with Cyberwave
 
 ```bash
-so101-calibrate --type leader --port /dev/ttyACM0 --id blue
-so101-calibrate --type follower --port /dev/ttyACM1 --id red
+so101-teleoperate --leader-port /dev/ttyACM0 --follower-port /dev/ttyACM1
 ```
 
-### 4. Teleoperate with Cyberwave
-
-```bash
-# Basic teleoperation (twin will be created automatically if --twin-uuid is not provided)
-so101-teleoperate \
-    --leader-port /dev/ttyACM0 \
-    --follower-port /dev/ttyACM1 \
-    --fps 30
-
-# With existing twin UUID
-so101-teleoperate \
-    --twin-uuid YOUR_TWIN_UUID \
-    --leader-port /dev/ttyACM0 \
-    --follower-port /dev/ttyACM1 \
-    --fps 30
-
-# With camera configuration file
-so101-teleoperate \
-    --leader-port /dev/ttyACM0 \
-    --camera-config camera_config.json
-```
-
-**Optional:** Generate a camera configuration file:
-
-```bash
-# Generate default CV2 camera config
-so101-teleoperate --generate-camera-config
-
-# Or with RealSense auto-detection
-so101-teleoperate --generate-camera-config --camera-type realsense --auto-detect
-```
+A twin is created automatically if `--twin-uuid` is not provided. Camera streaming uses default settings (USB camera 0). See [Advanced Settings](#advanced-settings) for camera options.
 
 ## Command-Line Tools
+
+### `so101-setup`
+
+Generate `setup.json` for wrist camera and additional cameras. Used by the edge node; typically not needed when using edge core (it auto-configures).
 
 ### `so101-find-port`
 
@@ -193,48 +137,24 @@ so101-find-port
 
 ### `so101-read-device`
 
-Read and display comprehensive data from SO101 motors.
+Read and display data from SO101 motors.
 
 ```bash
-# Single read
 so101-read-device --port /dev/ttyACM0
-
-# Continuous mode (updates every second)
-so101-read-device --port /dev/ttyACM0 --continuous
-
-# Read specific motors
-so101-read-device --port /dev/ttyACM0 --motor-ids 1 2 3
-
-# Show raw register values
-so101-read-device --port /dev/ttyACM0 --show-raw
 ```
+
+Add `--continuous` for live updates every second.
 
 ### `so101-calibrate`
 
 Calibrate SO101 leader or follower devices.
 
-**Note:** The `--id` argument is optional. If not provided, it defaults to `{type}1` (e.g., `leader1` for `--type leader`, `follower1` for `--type follower`).
-
 ```bash
-# Basic calibration (ID defaults to leader1)
 so101-calibrate --type leader --port /dev/ttyACM0
-
-# With interactive port finding (ID defaults to leader1)
-so101-calibrate --type leader --find-port
-
-# Custom ID
-so101-calibrate --type leader --port /dev/ttyACM0 --id blue
-
-# Custom calibration directory
-so101-calibrate --type leader --port /dev/ttyACM0 \
-    --calibration-dir ~/my_calibrations
-
-# Specify voltage rating (5V or 12V)
-so101-calibrate --type leader --port /dev/ttyACM0 --voltage-rating 5
-
-# Follower calibration (ID defaults to follower1)
 so101-calibrate --type follower --port /dev/ttyACM1
 ```
+
+Use `--find-port` to discover the port interactively. The `--id` defaults to `leader1` or `follower1`. See [Advanced Settings](#advanced-settings) for custom calibration dir, voltage rating, etc.
 
 **Calibration Process:**
 
@@ -249,214 +169,109 @@ so101-calibrate --type follower --port /dev/ttyACM1
 4. Press ENTER to stop recording
 5. Calibration is saved to `~/.cyberwave/so101_lib/calibrations/{id}.json`
 
+### Teleoperate vs Remote Operate
+
+| | **Teleoperate** (local controller) | **Remote Operate** (Cyberwave controller) |
+|---|---|---|
+| **Controller** | Physical leader arm connected locally (same machine as follower) | Cyberwave web app or API (user controls from browser/remote) |
+| **Hardware** | Leader + follower (both on serial ports) | Follower only |
+| **Data flow** | Leader → local process → follower → Cyberwave | Cyberwave (MQTT) → local process → follower |
+| **Use case** | Hands-on teleoperation: move the leader arm, follower mirrors in real time | Remote control: operate the robot from anywhere via the Cyberwave application |
+
+**Teleoperate** reads joint positions from the leader arm, sends them to the follower, and publishes the follower state to Cyberwave. The operator is physically at the edge device.
+
+**Remote Operate** subscribes to joint states from Cyberwave (sent when a user controls the twin in the app), then writes those targets to the follower. The operator can be anywhere.
+
 ### `so101-teleoperate`
 
-Run teleoperation loop with Cyberwave integration and camera streaming.
-
-**Note:** Requires `CYBERWAVE_API_KEY` environment variable to be set.
+Run teleoperation with a **local leader arm**: read from leader, mirror to follower, stream to Cyberwave. Requires `CYBERWAVE_API_KEY`.
 
 ```bash
-# Set environment variable first
-export CYBERWAVE_API_KEY=your_token_here
-
-# Basic teleoperation with CV2 USB camera (twin will be created automatically)
-so101-teleoperate \
-    --leader-port /dev/ttyACM0 \
-    --fps 30 \
-    --camera-fps 30
-
-# With existing twin UUID
-so101-teleoperate \
-    --twin-uuid YOUR_TWIN_UUID \
-    --leader-port /dev/ttyACM0 \
-    --fps 30 \
-    --camera-fps 30
-
-# Use RealSense camera with depth streaming
-so101-teleoperate \
-    --leader-port /dev/ttyACM0 \
-    --follower-port /dev/ttyACM1 \
-    --camera-type realsense \
-    --camera-resolution HD \
-    --enable-depth \
-    --depth-fps 15
-
-# Use IP camera / RTSP stream
-so101-teleoperate \
-    --leader-port /dev/ttyACM0 \
-    --camera-id "rtsp://192.168.1.100:554/stream" \
-    --camera-resolution VGA
-
-# Use camera configuration file
-so101-teleoperate \
-    --leader-port /dev/ttyACM0 \
-    --camera-config camera_config.json
-
-# Camera-only mode (no teleoperation, just streaming)
-so101-teleoperate \
-    --follower-port /dev/ttyACM1 \
-    --camera-only \
-    --camera-config camera_config.json
+so101-teleoperate --leader-port /dev/ttyACM0 --follower-port /dev/ttyACM1
 ```
 
-**Options:**
-
-- `--twin-uuid`: UUID of the Cyberwave twin to update (optional - if not provided, a new twin will be created automatically)
-- `--leader-port`: Serial port for leader device (required, unless using --camera-only)
-- `--follower-port`: Optional serial port for follower device
-- `--fps`: Target frames per second for teleoperation loop (default: 30)
-- `--camera-fps`: Frames per second for camera streaming (default: 30)
-- `--camera-uuid`: UUID of the twin to stream camera to (default: same as --twin-uuid)
-- `--camera-type`: Camera type: 'cv2' for USB/webcam/IP, 'realsense' for Intel RealSense (default: 'cv2')
-- `--camera-id`: Camera device ID (int) or stream URL (str) for CV2 cameras (default: '0')
-- `--camera-resolution`: Camera resolution: QVGA, VGA, SVGA, HD, FULL_HD, or WIDTHxHEIGHT (default: VGA)
-- `--enable-depth`: Enable depth streaming for RealSense cameras
-- `--depth-fps`: Depth stream FPS for RealSense cameras (default: 30)
-- `--depth-resolution`: Depth stream resolution for RealSense (default: same as --camera-resolution)
-- `--depth-publish-interval`: Publish depth frame every N frames for RealSense (default: 30)
-- `--camera-config`: Path to camera configuration JSON file (overrides CLI arguments)
-- `--generate-camera-config`: Generate a camera configuration file and exit
-- `--auto-detect`: Auto-detect RealSense device capabilities when generating config
-- `--list-realsense`: List available RealSense devices and exit
-- `--camera-only`: Only stream camera, skip teleoperation loop (requires --follower-port)
-
-**Note:** Positions are always converted to radians for Cyberwave integration.
-
-### Camera Configuration
-
-Camera settings can be managed via JSON configuration files for easy sharing and reuse.
-
-#### Generate Camera Configuration
-
-```bash
-# Generate default CV2 camera config
-so101-teleoperate --generate-camera-config
-
-# Generate RealSense config with auto-detection
-so101-teleoperate --generate-camera-config --camera-type realsense --auto-detect
-
-# Generate to custom path
-so101-teleoperate --generate-camera-config my_camera.json --camera-type cv2
-```
-
-#### List RealSense Devices
-
-```bash
-# List all connected RealSense devices
-so101-teleoperate --list-realsense
-```
-
-#### Camera Configuration File Format
-
-**CV2 USB Camera (`camera_config.json`):**
-
-```json
-{
-  "camera_type": "cv2",
-  "camera_id": 0,
-  "fps": 30,
-  "resolution": [640, 480]
-}
-```
-
-**RealSense Camera with Depth:**
-
-```json
-{
-  "camera_type": "realsense",
-  "fps": 30,
-  "resolution": [1280, 720],
-  "enable_depth": true,
-  "depth_fps": 15,
-  "depth_resolution": [640, 480],
-  "depth_publish_interval": 30
-}
-```
-
-**IP Camera / RTSP Stream:**
-
-```json
-{
-  "camera_type": "cv2",
-  "camera_id": "rtsp://192.168.1.100:554/stream",
-  "fps": 15,
-  "resolution": [640, 480]
-}
-```
-
-#### Using Camera Configuration
-
-```bash
-# Use config file instead of CLI arguments (twin will be created automatically)
-so101-teleoperate \
-    --leader-port /dev/ttyACM0 \
-    --camera-config camera_config.json
-
-# Or with existing twin UUID
-so101-teleoperate \
-    --twin-uuid YOUR_TWIN_UUID \
-    --leader-port /dev/ttyACM0 \
-    --camera-config camera_config.json
-```
-
-The same camera configuration file can be used with both `so101-teleoperate` and `so101-remoteoperate`.
+Uses default USB camera (device 0) and 30 FPS. See [Advanced Settings](#advanced-settings) for camera options, RealSense, IP streams, and config files.
 
 ### `so101-remoteoperate`
 
-Run remote operation loop: receive joint states via MQTT and write to follower motors.
-
-**Note:** Requires `CYBERWAVE_API_KEY` environment variable to be set.
+Run remote operation: receive joint states from the **Cyberwave application** via MQTT and write to the follower. Requires `CYBERWAVE_API_KEY`.
 
 ```bash
-# Basic remote operation with CV2 camera (twin will be created automatically)
-so101-remoteoperate \
-    --follower-port /dev/ttyACM1 \
-    --camera-fps 30
-
-# With existing twin UUID
-so101-remoteoperate \
-    --twin-uuid YOUR_TWIN_UUID \
-    --follower-port /dev/ttyACM1 \
-    --camera-fps 30
-
-# Use RealSense camera with depth
-so101-remoteoperate \
-    --follower-port /dev/ttyACM1 \
-    --camera-type realsense \
-    --enable-depth \
-    --camera-resolution HD
-
-# Use camera configuration file
-so101-remoteoperate \
-    --follower-port /dev/ttyACM1 \
-    --camera-config camera_config.json
+so101-remoteoperate --follower-port /dev/ttyACM1
 ```
 
-**Options:**
+See [Advanced Settings](#advanced-settings) for camera options.
 
-- `--twin-uuid`: UUID of the Cyberwave twin to subscribe to (optional - if not provided, a new twin will be created automatically)
-- `--follower-port`: Serial port for follower device (required)
-- `--max-relative-target`: Maximum change per update for follower (safety limit)
-- `--follower-id`: Device identifier for calibration file (default: 'follower1')
-- `--camera-uuid`: UUID of the twin to stream camera to (default: same as --twin-uuid)
-- `--camera-fps`: Frames per second for camera streaming (default: 30)
-- `--camera-type`: Camera type: 'cv2' or 'realsense' (default: 'cv2')
-- `--camera-id`: Camera device ID or stream URL for CV2 cameras (default: '0')
-- `--camera-resolution`: Camera resolution (default: VGA)
-- `--enable-depth`: Enable depth streaming for RealSense
-- `--depth-fps`: Depth stream FPS for RealSense (default: 30)
-- `--depth-resolution`: Depth stream resolution for RealSense
-- `--depth-publish-interval`: Publish depth every N frames (default: 30)
-- `--camera-config`: Path to camera configuration JSON file
-- `--list-realsense`: List available RealSense devices and exit
+## Advanced Settings
+
+### `so101-teleoperate` and `so101-remoteoperate` — Camera Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--twin-uuid` | Cyberwave twin UUID | Auto-created if omitted |
+| `--fps` | Teleoperation loop FPS | 30 |
+| `--camera-fps` | Camera streaming FPS | 30 |
+| `--camera-type` | `cv2` (USB/webcam/IP) or `realsense` | cv2 |
+| `--camera-id` | Camera device ID or RTSP URL | 0 |
+| `--camera-resolution` | QVGA, VGA, SVGA, HD, FULL_HD, or WIDTHxHEIGHT | VGA |
+| `--camera-config` | Path to JSON config file | — |
+| `--enable-depth` | RealSense depth streaming | false |
+| `--depth-fps`, `--depth-resolution`, `--depth-publish-interval` | RealSense depth options | — |
+| `--camera-only` | Stream camera only, no teleoperation | — |
+| `--max-relative-target` | Follower safety limit (remoteoperate) | — |
+| `--follower-id` | Calibration file ID (remoteoperate) | follower1 |
+
+**Examples:**
+
+```bash
+# RealSense with depth
+so101-teleoperate --leader-port /dev/ttyACM0 --follower-port /dev/ttyACM1 \
+    --camera-type realsense --enable-depth --camera-resolution HD
+
+# IP camera / RTSP
+so101-teleoperate --leader-port /dev/ttyACM0 --camera-id "rtsp://192.168.1.100:554/stream"
+
+# Use config file
+so101-teleoperate --leader-port /dev/ttyACM0 --camera-config camera_config.json
+```
+
+### Camera Configuration File
+
+Generate a config: `so101-teleoperate --generate-camera-config` (add `--camera-type realsense --auto-detect` for RealSense). List RealSense devices: `so101-teleoperate --list-realsense`.
+
+**CV2 USB:**
+```json
+{"camera_type": "cv2", "camera_id": 0, "fps": 30, "resolution": [640, 480]}
+```
+
+**RealSense with depth:**
+```json
+{"camera_type": "realsense", "fps": 30, "resolution": [1280, 720], "enable_depth": true, "depth_fps": 15}
+```
+
+**IP/RTSP:**
+```json
+{"camera_type": "cv2", "camera_id": "rtsp://192.168.1.100:554/stream", "fps": 15, "resolution": [640, 480]}
+```
+
+### `so101-calibrate` — Advanced Options
+
+- `--id` — Device ID for calibration file (default: leader1 / follower1)
+- `--calibration-dir` — Custom calibration directory
+- `--voltage-rating` — 5 or 12 (auto-detected if omitted)
+
+### `so101-read-device` — Advanced Options
+
+- `--motor-ids` — Read specific motors (e.g. `--motor-ids 1 2 3`)
+- `--show-raw` — Show raw register values
 
 ## Python API
 
 ### Basic Usage
 
 ```python
-from leader import SO101Leader
-from config import LeaderConfig
+from so101.leader import SO101Leader
+from utils.config import LeaderConfig
 
 # Create leader configuration
 config = LeaderConfig(port="/dev/ttyACM0", id="leader1")
@@ -465,13 +280,9 @@ config = LeaderConfig(port="/dev/ttyACM0", id="leader1")
 leader = SO101Leader(config=config)
 leader.connect()
 
-# Get current positions, velocities, and loads
-action = leader.get_action()
-# Returns: {
-#     "shoulder_pan": {"position": 2048.0, "velocity": 0.0, "load": 0.0},
-#     "shoulder_lift": {"position": 2048.0, "velocity": 0.0, "load": 0.0},
-#     ...
-# }
+# Get current joint positions (normalized)
+positions = leader.get_observation()
+# Returns: {"shoulder_pan.pos": 0.0, "shoulder_lift.pos": 0.0, ...}
 
 # Disconnect
 leader.disconnect()
@@ -480,8 +291,8 @@ leader.disconnect()
 ### Calibration
 
 ```python
-from leader import SO101Leader
-from config import LeaderConfig
+from so101.leader import SO101Leader
+from utils.config import LeaderConfig
 
 config = LeaderConfig(port="/dev/ttyACM0", id="leader1")
 leader = SO101Leader(config=config)
@@ -496,10 +307,10 @@ leader.calibrate()
 ### Teleoperation
 
 ```python
-from leader import SO101Leader
-from follower import SO101Follower
-from config import LeaderConfig, FollowerConfig
-from teleoperate import teleoperate
+from so101.leader import SO101Leader
+from so101.follower import SO101Follower
+from utils.config import LeaderConfig, FollowerConfig
+from scripts.cw_teleoperate import teleoperate
 from cyberwave import Cyberwave
 from cyberwave.sensor import Resolution
 
@@ -518,43 +329,22 @@ follower_config = FollowerConfig(port="/dev/ttyACM1", id="follower1")
 follower = SO101Follower(config=follower_config)
 follower.connect()
 
-# Run teleoperation with CV2 camera
-try:
-    teleoperate(
-        leader=leader,
-        cyberwave_client=cyberwave_client,
-        follower=follower,  # Optional
-        fps=30,
-        camera_fps=30,
-        robot=robot,
-        camera=camera,
-        camera_type="cv2",  # "cv2" or "realsense"
-        camera_id=0,  # Camera device ID or URL
-        camera_resolution=Resolution.HD,  # Resolution enum
-        enable_depth=False,
-    )
-finally:
-    leader.disconnect()
-    if follower:
-        follower.disconnect()
-    cyberwave_client.disconnect()
+# Build cameras list (each dict: twin, camera_id, camera_type, camera_resolution, fps)
+cameras = [{
+    "twin": camera,
+    "camera_id": 0,
+    "camera_type": "cv2",
+    "camera_resolution": Resolution.HD,
+    "fps": 30,
+}]
 
-# Run teleoperation with RealSense camera and depth
 try:
     teleoperate(
         leader=leader,
         cyberwave_client=cyberwave_client,
         follower=follower,
-        fps=30,
-        camera_fps=30,
         robot=robot,
-        camera=camera,
-        camera_type="realsense",
-        camera_resolution=Resolution.HD,
-        enable_depth=True,
-        depth_fps=15,
-        depth_resolution=Resolution.VGA,
-        depth_publish_interval=30,
+        cameras=cameras,
     )
 finally:
     leader.disconnect()
@@ -566,9 +356,9 @@ finally:
 ### Remote Operation
 
 ```python
-from follower import SO101Follower
-from config import FollowerConfig
-from remoteoperate import remoteoperate
+from so101.follower import SO101Follower
+from utils.config import FollowerConfig
+from scripts.cw_remoteoperate import remoteoperate
 from cyberwave import Cyberwave
 from cyberwave.sensor import Resolution
 
@@ -582,17 +372,21 @@ follower_config = FollowerConfig(port="/dev/ttyACM1", id="follower1")
 follower = SO101Follower(config=follower_config)
 follower.connect()
 
-# Run remote operation
+# Build cameras list
+cameras = [{
+    "twin": camera,
+    "camera_id": 0,
+    "camera_type": "cv2",
+    "camera_resolution": Resolution.VGA,
+    "fps": 30,
+}]
+
 try:
     remoteoperate(
         client=cyberwave_client,
         follower=follower,
         robot=robot,
-        camera=camera,
-        camera_fps=30,
-        camera_type="cv2",
-        camera_id=0,
-        camera_resolution=Resolution.VGA,
+        cameras=cameras,
     )
 finally:
     follower.disconnect()
@@ -631,77 +425,12 @@ Calibration files are saved as JSON in `~/.cyberwave/so101_lib/calibrations/{id}
 - `range_min`: Minimum position recorded during calibration (raw encoder units)
 - `range_max`: Maximum position recorded during calibration (raw encoder units)
 
-## Normalization Modes
-
-The library supports three normalization modes:
-
-### `RANGE_M100_100`
-
-Normalizes positions to the range [-100, 100] based on calibrated min/max.
-
-**Formula:** `norm = (((bounded_val - min_) / (max_ - min_)) * 200) - 100`
-
-### `RANGE_0_100`
-
-Normalizes positions to the range [0, 100] based on calibrated min/max.
-
-**Formula:** `norm = ((bounded_val - min_) / (max_ - min_)) * 100`
-
-### `DEGREES`
-
-Converts positions to degrees relative to the calibrated center.
-
-**Formula:** `degrees = (raw_encoder_value - mid) * 360 / 4095`
-
-Where:
-
-- `mid = (range_min + range_max) / 2` (center of calibrated range)
-- `max_res = 4095` (12-bit encoder resolution)
-
-**Characteristics:**
-
-- 0 degrees is at the midpoint of the calibrated range
-- Values can be negative (below center) or positive (above center)
-- Theoretical maximum: ±180 degrees if using full encoder range (0-4095)
-- Practical maximum: depends on calibration (how far joints were moved)
-
-## Architecture
-
-### Core Components
-
-- **`motors/`**: Motor bus layer and data models
-  - `bus.py`: Abstract base class for motor buses
-  - `feetech_bus.py`: Feetech STS3215 implementation
-  - `models.py`: Motor and calibration data models
-  - `tables.py`: Control table addresses and constants
-  - `encoding.py`: Sign-magnitude encoding/decoding utilities
-
-- **`leader.py`**: SO101Leader class for passive teleoperation
-- **`follower.py`**: SO101Follower class for active robot control
-- **`teleoperate.py`**: Teleoperation loop with Cyberwave integration and camera streaming
-- **`remoteoperate.py`**: Remote operation loop: receive joint states via MQTT and control follower
-- **`config.py`**: Configuration dataclasses
-- **`utils.py`**: Utility functions (port detection, calibration I/O, etc.)
-
-### Motor Configuration
-
-The SO101 has 6 motors:
-
-- `shoulder_pan` (ID: 1)
-- `shoulder_lift` (ID: 2)
-- `elbow_flex` (ID: 3)
-- `wrist_flex` (ID: 4)
-- `wrist_roll` (ID: 5)
-- `gripper` (ID: 6)
-
-By default, all motors use `RANGE_M100_100` normalization except `gripper` which uses `RANGE_0_100`.
-
 ## Configuration
 
 ### LeaderConfig
 
 ```python
-from config import LeaderConfig
+from utils.config import LeaderConfig
 
 config = LeaderConfig(
     port="/dev/ttyACM0",  # Serial port
@@ -715,7 +444,7 @@ config = LeaderConfig(
 ### FollowerConfig
 
 ```python
-from config import FollowerConfig
+from utils.config import FollowerConfig
 
 config = FollowerConfig(
     port="/dev/ttyACM1",
@@ -789,6 +518,65 @@ so101-calibrate --type leader --port /dev/ttyACM0 --voltage-rating 5
 - Verify port permissions (on Linux, you may need to add your user to the `dialout` group)
 - Try a different USB port
 
+## Edge Core Integration
+
+When deployed with [Cyberwave Edge Core](https://github.com/cyberwave/cyberwave-edge-core), the SO101 node runs as a Docker container and handles configuration **automatically**. No manual port or camera setup is required.
+
+### How Edge Core Runs the SO101 Node
+
+- Edge core mounts the config directory (`/etc/cyberwave` or `CYBERWAVE_EDGE_CONFIG_DIR`) into the container at `/app/.cyberwave`
+- Twin JSON files (from the edge install flow) are synced into this directory
+- Environment variables: `CYBERWAVE_TWIN_UUID`, `CYBERWAVE_API_KEY`, `CYBERWAVE_TWIN_JSON_FILE`, `CYBERWAVE_EDGE_CONFIG_DIR`
+- The entrypoint (`entrypoint.sh`) loads twin metadata from the JSON file into env vars, then runs `main.py`
+
+### Automatic Setup on Startup
+
+On startup, `main.py` runs `_ensure_setup(twin_uuid)`, which bootstraps `setup.json` without user input:
+
+1. **Leader/follower port detection**  
+   Scans serial ports (`/dev/ttyACM*`, `/dev/ttyUSB*` on Linux; `/dev/tty.usbmodem*` on macOS), runs voltage detection on each SO101 device, and assigns:
+   - **5V** → leader port  
+   - **12V** → follower port  
+   If one port fails voltage detection but exactly two ports are found, the missing role is inferred from the other.
+
+2. **Camera discovery**  
+   Reads twin JSONs from the edge config dir:
+   - **Wrist camera**: From the primary robot twin’s `sensors_devices` (e.g. `/dev/video0`)
+   - **Additional cameras**: Other twin JSONs with `attach_to_twin_uuid` matching the primary robot (e.g. RealSense attached as a separate twin)
+
+3. **Setup merge**  
+   Writes `setup.json` to `~/.cyberwave/so101_lib/` (or `CYBERWAVE_EDGE_CONFIG_DIR/so101_lib/` in the container), merging discovered ports and cameras with any existing config (e.g. from a previous `so101-calibrate` run).
+
+### Controller Policy and Operations
+
+The node subscribes to MQTT command messages. When the backend sends `controller-changed` (e.g. after a user switches the twin’s controller policy):
+
+- **`localop`** → starts `so101-teleoperate` (leader + follower, local teleoperation)
+- **Other** → starts `so101-remoteoperate` (follower only, receives joint states from the frontend via MQTT)
+
+Both operations read hardware config from `setup.json` (ports, cameras, `max_relative_target`). No CLI arguments are needed.
+
+### Calibration-Required Flow
+
+If teleoperation is requested but no calibration file exists for the follower (or leader, for local teleop):
+
+1. An alert is created on the twin (“Calibration Needed”)
+2. The node switches to calibration mode
+3. In interactive mode (TTY), it runs `so101-calibrate` as a subprocess
+4. After calibration completes, the alert is resolved and the original operation can be started again
+
+### Manual Docker Run (without Edge Core)
+
+```bash
+# Build the image
+docker build -t cyberwave-so101 .
+
+# Run (requires CYBERWAVE_API_KEY, CYBERWAVE_TWIN_UUID; config from edge-core)
+docker run --rm -e CYBERWAVE_API_KEY=... -e CYBERWAVE_TWIN_UUID=... cyberwave-so101
+```
+
+For full automatic setup, run via edge core so it can mount the config directory and twin JSONs.
+
 ## Development
 
 ### Install Development Dependencies
@@ -822,3 +610,4 @@ Contributions are welcome! Please open an issue or submit a pull request.
 
 - [Feetech STS3215 Documentation](https://www.feetechrc.com/)
 - [Cyberwave Platform](https://cyberwave.com/)
+- [Cyberwave Edge Core](https://github.com/cyberwave/cyberwave-edge-core) – orchestrates edge nodes and mounts config
