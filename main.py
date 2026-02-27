@@ -167,10 +167,29 @@ def _is_leader_calibrated(leader_id: str = "leader1") -> bool:
 
 
 def _get_config_dir():
-    """Edge config dir (twin JSONs from edge-core)."""
+    """Edge config dir (twin JSONs from edge-core). Mounted at /app/.cyberwave in container."""
     from utils.config import get_so101_lib_dir
 
     return get_so101_lib_dir().parent
+
+
+def _get_primary_robot_json_path(primary_uuid: str):
+    """Path to primary robot twin JSON.
+
+    Design (from cyberwave edge install flow):
+    - CYBERWAVE_TWIN_UUID + CYBERWAVE_TWIN_JSON_FILE point to the primary robot (one env var).
+    - When multiple twins are selected, all twin JSONs live in config_dir, but only
+      the primary is passed via CYBERWAVE_TWIN_JSON_FILE.
+    """
+    from pathlib import Path
+
+    env_path = os.getenv("CYBERWAVE_TWIN_JSON_FILE", "").strip()
+    if env_path and env_path.endswith(f"{primary_uuid}.json"):
+        p = Path(env_path)
+        if p.is_file():
+            return p
+    config_dir = _get_config_dir()
+    return config_dir / f"{primary_uuid}.json"
 
 
 def _load_all_twin_jsons() -> list[dict]:
@@ -199,13 +218,103 @@ def _load_all_twin_jsons() -> list[dict]:
     return result
 
 
-def _discover_cameras_for_so101(so101_uuid: str) -> list[dict]:
-    """Find camera twins attached to SO101 (attach_to_twin_uuid == so101_uuid). Max 2."""
+RGB_SENSOR_TYPES = frozenset({"rgb", "camera", "rgb_camera", "rgbd"})
+
+
+def _get_robot_twin_sensor_cameras(primary_uuid: str) -> list[dict]:
+    """Get camera entries from the primary robot twin's RGB sensors (sensors_devices).
+
+    The primary robot is identified by CYBERWAVE_TWIN_UUID. Its JSON (from
+    CYBERWAVE_TWIN_JSON_FILE or config_dir/{uuid}.json) contains sensors_devices
+    mapping sensor IDs to /dev/video*. These are the wrist/primary camera(s).
+    """
+    robot_json = _get_primary_robot_json_path(primary_uuid)
+    if not robot_json.is_file():
+        return []
+
+    try:
+        import json
+
+        with open(robot_json) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    if not isinstance(data, dict):
+        return []
+
+    asset = data.get("asset") or {}
+    metadata = data.get("metadata") or {}
+    if isinstance(asset, dict):
+        metadata = asset.get("metadata") or metadata
+
+    sensor_ids: list[str] = []
+    schema = metadata.get("universal_schema") or asset.get("universal_schema")
+    if schema and isinstance(schema, dict):
+        sensors = schema.get("sensors", [])
+        if isinstance(sensors, list):
+            for i, s in enumerate(sensors):
+                if isinstance(s, dict):
+                    stype = (s.get("type") or "").lower()
+                    if stype in RGB_SENSOR_TYPES:
+                        sid = (
+                            s.get("id")
+                            or (s.get("parameters") or {}).get("id")
+                            or s.get("name")
+                            or f"sensor_{i}"
+                        )
+                        sensor_ids.append(str(sid))
+
+    caps = metadata.get("capabilities", {}) if isinstance(metadata, dict) else {}
+    if not sensor_ids and isinstance(caps, dict):
+        sensors = caps.get("sensors", [])
+        if isinstance(sensors, list):
+            for i, s in enumerate(sensors):
+                if isinstance(s, dict) and (s.get("type") or "").lower() in RGB_SENSOR_TYPES:
+                    sid = s.get("id") or s.get("name") or f"sensor_{i}"
+                    sensor_ids.append(str(sid))
+
+    sensors_devices = metadata.get("sensors_devices") or {}
+    if not isinstance(sensors_devices, dict):
+        return []
+
+    # Use sensor_ids from schema if found; else use sensors_devices keys (e.g. "Logitech C920 camera")
+    ids_to_check = sensor_ids if sensor_ids else list(sensors_devices.keys())
+
+    result: list[dict] = []
+    for sid in ids_to_check:
+        port = sensors_devices.get(sid)
+        if port and str(port).strip():
+            result.append({
+                "twin_uuid": primary_uuid,
+                "attach_to_link": "robot_sensor",
+                "camera_type": "cv2",
+                "camera_id": 0,
+                "video_device": str(port).strip(),
+                "sensor_id": sid,
+            })
+    return result
+
+
+def _discover_cameras_for_so101(primary_uuid: str) -> list[dict]:
+    """Find cameras for SO101: primary robot sensors (wrist) + attached camera twins (additional).
+
+    Design (cyberwave edge install):
+    - Primary robot = CYBERWAVE_TWIN_UUID (one env var when multiple twins selected).
+    - Wrist camera = robot's RGB sensors from primary JSON (sensors_devices).
+    - Additional cameras = other twin JSONs in config_dir where attach_to_twin_uuid
+      equals the primary robot UUID.
+    Max 2 cameras.
+    """
+    # 1. Primary robot's own sensors (wrist camera) from primary JSON
+    robot_cams = _get_robot_twin_sensor_cameras(primary_uuid)
+
+    # 2. Attached camera twins (attach_to_twin_uuid == primary_robot_uuid)
     twins = _load_all_twin_jsons()
     attached: list[dict] = []
     for t in twins:
         attach = t.get("attach_to_twin_uuid") or t.get("attach_to_twin")
-        if str(attach) != str(so101_uuid):
+        if str(attach) != str(primary_uuid):
             continue
         asset = t.get("asset") or {}
         reg = (asset.get("registry_id") or asset.get("metadata", {}).get("registry_id") or "").lower()
@@ -219,9 +328,11 @@ def _discover_cameras_for_so101(so101_uuid: str) -> list[dict]:
             "camera_id": 0 if "wrist" in (t.get("attach_to_link") or "").lower() else 1,
             "video_device": video_device,
         })
-    # Sort: wrist first (attach_to_link contains "wrist"), then others
+
+    # Merge: robot sensors (wrist) first, then attached twins. Sort attached by attach_to_link.
     attached.sort(key=lambda c: (0 if "wrist" in (c.get("attach_to_link") or "").lower() else 1, c.get("twin_uuid", "")))
-    return attached[:2]
+    combined = robot_cams + attached
+    return combined[:2]
 
 
 def _ensure_setup(twin_uuid: str) -> None:
@@ -255,7 +366,12 @@ def _ensure_setup(twin_uuid: str) -> None:
         existing["follower_port"] = discovered["follower_port"]
 
     cameras = _discover_cameras_for_so101(twin_uuid)
-    wrist_cam = next((c for c in cameras if "wrist" in (c.get("attach_to_link") or "").lower()), None)
+    # Wrist = primary robot sensor (robot_sensor) or attached with "wrist" in link; else first
+    def _link(c): return (c.get("attach_to_link") or "").lower()
+    wrist_cam = next(
+        (c for c in cameras if _link(c) == "robot_sensor" or "wrist" in _link(c)),
+        cameras[0] if cameras else None,
+    )
     add_cams = [c for c in cameras if c != wrist_cam]
 
     def _camera_id(cam: dict | None) -> int | str:
@@ -266,7 +382,7 @@ def _ensure_setup(twin_uuid: str) -> None:
     config = create_setup_config(
         twin_uuid=twin_uuid,
         wrist_camera=bool(wrist_cam),
-        wrist_camera_twin_uuid=twin_uuid if wrist_cam else None,
+        wrist_camera_twin_uuid=wrist_cam.get("twin_uuid") if wrist_cam else None,
         wrist_camera_id=_camera_id(wrist_cam),
         additional_camera_type=add_cams[0].get("camera_type", "cv2") if add_cams else None,
         additional_camera_id=_camera_id(add_cams[0]) if add_cams else 1,
