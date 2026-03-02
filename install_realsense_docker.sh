@@ -44,6 +44,7 @@ elif [ "$ARCH" = "arm64" ]; then
         > "/usr/local/lib/python${PYTHON_VERSION}/dist-packages/pyrealsense2.pth"
 
     # Clean up build artifacts and source, keep installed libs
+    cd /
     rm -rf /tmp/librealsense
     apt-get purge -y --auto-remove git wget cmake build-essential pkg-config python3-dev
     rm -rf /var/lib/apt/lists/*
