@@ -89,10 +89,13 @@ def create_setup_config(
         "additional_cameras": [],
     }
 
+    ADDITIONAL_NAMES = ("primary", "secondary")
+    EXTERNAL_NAMES = ("external", "external2")
+
     if additional_cameras:
         for i, ac in enumerate(additional_cameras):
-            setup_name = ac.get("setup_name", "primary" if i == 0 else "secondary")
-            cam_name = "external" if setup_name == "primary" else "external2"
+            setup_name = ac.get("setup_name") or ADDITIONAL_NAMES[min(i, len(ADDITIONAL_NAMES) - 1)]
+            cam_name = EXTERNAL_NAMES[min(i, len(EXTERNAL_NAMES) - 1)]
             res = ac.get("resolution")
             if res is None:
                 res = _parse_resolution(resolution)

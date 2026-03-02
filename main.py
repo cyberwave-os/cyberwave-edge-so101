@@ -367,14 +367,21 @@ def _resolve_camera_device_for_twin(
     """Resolve video_device or camera_id for a twin from sensors_devices or cameras.json.
 
     - If twin has metadata.sensors_devices or metadata.video_device: use the specified device.
+    - Also checks asset.metadata for sensors_devices (edge-core may store it there).
     - If twin is RealSense/depth and no sensors_devices: auto-bind if single RealSense.
     - If multiple RealSenses: must have sensors_devices (return None otherwise).
     """
     meta = twin.get("metadata") or {}
-    video_device = (meta.get("video_device") or "").strip()
+    asset = twin.get("asset") or {}
+    asset_meta = asset.get("metadata") or {} if isinstance(asset, dict) else {}
+
+    def _get_meta(key: str) -> str | dict:
+        return meta.get(key) or asset_meta.get(key)
+
+    video_device = (_get_meta("video_device") or "").strip()
     if video_device:
-        return video_device
-    sensors_devices = meta.get("sensors_devices") or {}
+        return str(video_device)
+    sensors_devices = _get_meta("sensors_devices")
     if isinstance(sensors_devices, dict):
         for _sid, dev in sensors_devices.items():
             if dev and str(dev).strip():
@@ -391,21 +398,42 @@ def _resolve_camera_device_for_twin(
     return None
 
 
+MAX_CAMERAS = 3
+ADDITIONAL_SETUP_NAMES = ("primary", "secondary")
+
+
+def _twin_is_camera_like(twin: dict) -> bool:
+    """True if twin has sensors_devices, video_device, or is a camera/RealSense asset."""
+    meta = twin.get("metadata") or {}
+    asset = twin.get("asset") or {}
+    asset_meta = asset.get("metadata") or {} if isinstance(asset, dict) else {}
+    if meta.get("video_device") or meta.get("sensors_devices"):
+        return True
+    if asset_meta.get("video_device") or asset_meta.get("sensors_devices"):
+        return True
+    if _twin_is_realsense(twin) or _twin_has_depth_sensor(twin):
+        return True
+    reg = (asset.get("registry_id") or asset_meta.get("registry_id") or "").lower()
+    return "camera" in reg or "realsense" in reg or "standard-cam" in reg
+
+
 def _discover_cameras_for_so101(primary_uuid: str) -> list[dict]:
-    """Find cameras for SO101: primary robot sensors + attached camera twins.
+    """Find cameras for SO101: primary robot sensors + attached/workspace camera twins.
 
     Assigns devices from cameras.json to twins by sensor type:
     - Depth sensor twin → RealSense device
     - RGB sensor twin → CV2 device
 
     Each twin gets exactly one device; each device is used at most once.
-    Supports max 3 cameras with semantic roles: primary, secondary, wrist_cam.
+    Supports max 3 cameras with semantic roles: wrist, primary, secondary.
+    Includes both attached twins and workspace twins that are camera-like (have
+    sensors_devices, video_device, or are camera assets).
     """
     cameras_json = _load_cameras_json()
     realsense_devices = _get_realsense_devices_from_cameras_json(cameras_json)
     cv2_devices = _get_cv2_devices_from_cameras_json(cameras_json)
 
-    # 1. Collect all camera twins (robot sensors + attached)
+    # 1. Collect all camera twins (robot sensors + attached + workspace camera twins)
     robot_cams = _get_robot_twin_sensor_cameras(primary_uuid)
     for rc in robot_cams:
         rc["setup_name"] = "wrist"
@@ -414,23 +442,31 @@ def _discover_cameras_for_so101(primary_uuid: str) -> list[dict]:
 
     twins = _load_all_twin_jsons()
     attached: list[dict] = []
+    additional_idx = 0
     for t in twins:
+        t_uuid = t.get("uuid")
+        if str(t_uuid) == str(primary_uuid):
+            continue
         attach = t.get("attach_to_twin_uuid") or t.get("attach_to_twin")
-        if str(attach) != str(primary_uuid):
+        is_attached = str(attach) == str(primary_uuid)
+        if not is_attached and not _twin_is_camera_like(t):
             continue
         has_depth = _twin_has_depth_sensor(t)
         is_realsense = _twin_is_realsense(t)
-        # RealSense assets are treated as depth cameras even without explicit depth sensor type
         is_depth_camera = has_depth or is_realsense
         meta = t.get("metadata") or {}
         setup_name = (meta.get("setup_name") or "").strip().lower()
         attach_link = (t.get("attach_to_link") or "").lower()
         if not setup_name:
-            setup_name = "wrist" if "wrist" in attach_link or "robot_sensor" in attach_link else "primary"
+            if "wrist" in attach_link or "robot_sensor" in attach_link:
+                setup_name = "wrist"
+            else:
+                setup_name = ADDITIONAL_SETUP_NAMES[min(additional_idx, len(ADDITIONAL_SETUP_NAMES) - 1)]
+                additional_idx += 1
 
         video_device = _resolve_camera_device_for_twin(t, cameras_json, realsense_devices)
         attached.append({
-            "twin_uuid": t.get("uuid"),
+            "twin_uuid": t_uuid,
             "attach_to_link": t.get("attach_to_link", ""),
             "setup_name": setup_name,
             "has_depth": is_depth_camera,
@@ -516,7 +552,7 @@ def _discover_cameras_for_so101(primary_uuid: str) -> list[dict]:
             continue
         used_devices.add(dev)
         cam_type = "realsense" if d in realsense_devices else "cv2"
-        setup_name = "wrist" if i == 0 else ("primary" if i == 1 else "secondary")
+        setup_name = "wrist" if i == 0 else ADDITIONAL_SETUP_NAMES[min(i - 1, len(ADDITIONAL_SETUP_NAMES) - 1)]
         result.append({
             "twin_uuid": primary_uuid,
             "attach_to_link": "robot_sensor",
@@ -527,19 +563,18 @@ def _discover_cameras_for_so101(primary_uuid: str) -> list[dict]:
             "enable_depth": cam_type == "realsense",
         })
 
-    # Sort: wrist first, then primary, then secondary
+    # Sort: wrist first, then primary, secondary, tertiary, etc.
     def _order(c: dict) -> int:
         sn = (c.get("setup_name") or "").lower()
         if sn == "wrist":
             return 0
-        if sn == "primary":
+        try:
+            return 1 + ADDITIONAL_SETUP_NAMES.index(sn)
+        except ValueError:
             return 1
-        if sn == "secondary":
-            return 2
-        return 1
 
     result.sort(key=lambda c: (_order(c), c.get("twin_uuid", "")))
-    return result[:3]
+    return result[:MAX_CAMERAS]
 
 
 def _ensure_setup(twin_uuid: str) -> None:
@@ -572,20 +607,20 @@ def _ensure_setup(twin_uuid: str) -> None:
         existing["follower_port"] = discovered["follower_port"]
 
     cameras = _discover_cameras_for_so101(twin_uuid)
-    # Partition by setup_name: wrist, primary, secondary (no fallback - each twin appears once)
+    # Partition: wrist vs additional (primary, secondary, tertiary, etc.)
     def _by_setup(c, name):
         return (c.get("setup_name") or "").lower() == name
+
     wrist_cam = next(
         (c for c in cameras if _by_setup(c, "wrist") or "wrist" in (c.get("attach_to_link") or "").lower()),
         None,
     )
-    primary_cam = next((c for c in cameras if _by_setup(c, "primary")), None)
-    secondary_cam = next((c for c in cameras if _by_setup(c, "secondary")), None)
-    # Exclude wrist from additional - each twin must appear only once
+    # Collect all additional cameras (not wrist), preserving order
     add_cams = [
         c
-        for c in [primary_cam, secondary_cam]
-        if c is not None and (wrist_cam is None or c.get("twin_uuid") != wrist_cam.get("twin_uuid"))
+        for c in cameras
+        if not _by_setup(c, "wrist") and "wrist" not in (c.get("attach_to_link") or "").lower()
+        and (wrist_cam is None or c.get("twin_uuid") != wrist_cam.get("twin_uuid"))
     ]
 
     def _camera_id(cam: dict | None) -> int | str:
@@ -602,7 +637,7 @@ def _ensure_setup(twin_uuid: str) -> None:
         wrist_camera_enable_depth=wrist_cam.get("enable_depth", False) if wrist_cam else False,
         additional_cameras=[
             {
-                "setup_name": c.get("setup_name", "primary" if i == 0 else "secondary"),
+                "setup_name": c.get("setup_name") or ADDITIONAL_SETUP_NAMES[min(i, len(ADDITIONAL_SETUP_NAMES) - 1)],
                 "camera_type": c.get("camera_type", "cv2"),
                 "camera_id": _camera_id(c),
                 "twin_uuid": str(c.get("twin_uuid", "")),
