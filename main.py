@@ -37,6 +37,9 @@ _calibration_client: Optional[Cyberwave] = None
 _calibration_twin_uuid: Optional[str] = None
 _calibration_alert_uuid: Optional[str] = None
 
+# When calibration completes, run this command (teleoperate or remoteoperate)
+_pending_recovery_command: Optional[str] = None
+
 
 def _trigger_alert_and_switch_to_calibration(
     client: Cyberwave,
@@ -45,13 +48,17 @@ def _trigger_alert_and_switch_to_calibration(
     follower_id: str = "follower1",
     leader_port: Optional[str] = None,
     leader_id: str = "leader1",
+    recovery_command: Optional[str] = None,
+    device_type: str = "follower",
 ) -> None:
     """
     User tried to start teleop/remoteoperate but calibration is missing.
-    Create an alert with calibration args in metadata. The user can then
-    trigger calibration via the frontend (backend dispatches commands to
-    twin/command). For offline use, run: python -m scripts.cw_calibrate directly.
+    Create an alert, store recovery_command for when calibration completes,
+    and start calibration directly. When calibration ends successfully,
+    we run the recovery command (teleoperate or remoteoperate).
     """
+    global _pending_recovery_command
+
     robot = client.twin(twin_id=twin_uuid)
 
     metadata = {
@@ -64,15 +71,19 @@ def _trigger_alert_and_switch_to_calibration(
         metadata["calibration"]["leader_port"] = leader_port
         metadata["calibration"]["leader_id"] = leader_id
 
-    description = "No calibration file found. Use the frontend to start calibration, or run: python -m scripts.cw_calibrate --type follower --port {port} --id {id}".format(
-        port=follower_port,
-        id=follower_id,
+    port = follower_port if device_type == "follower" else (leader_port or follower_port)
+    device_id = follower_id if device_type == "follower" else leader_id
+
+    description = "No calibration file found. Use the frontend to start calibration, or run: python -m scripts.cw_calibrate --type {type} --port {port} --id {id}".format(
+        type=device_type,
+        port=port,
+        id=device_id,
     )
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         description = (
             "Calibration requires interactive mode. "
             "SSH into the device and run: python -m scripts.cw_calibrate "
-            f"--type follower --port {follower_port} --id {follower_id}"
+            f"--type {device_type} --port {port} --id {device_id}"
         )
 
     alert = robot.alerts.create(
@@ -83,7 +94,26 @@ def _trigger_alert_and_switch_to_calibration(
         metadata=metadata,
     )
     logger.info("Created calibration alert %s for twin %s", alert.uuid, twin_uuid)
-    client.mqtt.publish_command_message(twin_uuid, "error")
+
+    if recovery_command:
+        _pending_recovery_command = recovery_command
+        logger.info("Stored recovery command: %s (will run after calibration)", recovery_command)
+
+    # Start calibration directly
+    if port:
+        script_data = {
+            "type": device_type,
+            "follower_id": follower_id,
+            "leader_id": leader_id,
+            "alert_uuid": alert.uuid,
+        }
+        if device_type == "follower":
+            script_data["follower_port"] = follower_port
+        else:
+            script_data["leader_port"] = leader_port
+        _handle_calibration_start(client, twin_uuid, script_data)
+    else:
+        client.mqtt.publish_command_message(twin_uuid, "error")
 
 
 def _is_follower_calibrated(follower_id: str = "follower1") -> bool:
@@ -1103,7 +1133,24 @@ def _run_calibration_with_advance(
                 logger.info("Calibration alert %s resolved", alert_uuid)
             except Exception:
                 logger.exception("Failed to resolve calibration alert")
+        # Recover: run the pending command (teleoperate or remoteoperate)
+        global _pending_recovery_command
+        if _pending_recovery_command:
+            cmd = _pending_recovery_command
+            _pending_recovery_command = None
+            logger.info("Calibration complete; recovering with command: %s", cmd)
+            try:
+                if cmd == "teleoperate":
+                    start_teleoperate(client, twin_uuid)
+                elif cmd == "remoteoperate":
+                    start_remoteoperate(client, twin_uuid)
+                else:
+                    logger.warning("Unknown recovery command: %s", cmd)
+            except Exception:
+                logger.exception("Failed to run recovery command %s", cmd)
+                client.mqtt.publish_command_message(twin_uuid, "error")
     else:
+        _pending_recovery_command = None
         client.mqtt.publish_command_message(twin_uuid, "error")
 
 
@@ -1323,7 +1370,10 @@ def start_remoteoperate(client: Cyberwave, twin_uuid: str) -> None:
     )
 
     if not _is_follower_calibrated(follower_id):
-        _trigger_alert_and_switch_to_calibration(client, twin_uuid, follower_port, follower_id)
+        _trigger_alert_and_switch_to_calibration(
+            client, twin_uuid, follower_port, follower_id,
+            recovery_command="remoteoperate",
+        )
         return
 
     def _run() -> None:
@@ -1435,9 +1485,20 @@ def start_teleoperate(client: Cyberwave, twin_uuid: str) -> None:
         float(cfg["max_relative_target"]) if cfg["max_relative_target"] else None
     )
 
-    if not _is_follower_calibrated(follower_id) or not _is_leader_calibrated(leader_id):
+    if not _is_follower_calibrated(follower_id):
         _trigger_alert_and_switch_to_calibration(
-            client, twin_uuid, follower_port, follower_id, leader_port, leader_id
+            client, twin_uuid, follower_port, follower_id,
+            leader_port=leader_port, leader_id=leader_id,
+            recovery_command="teleoperate",
+            device_type="follower",
+        )
+        return
+    if not _is_leader_calibrated(leader_id):
+        _trigger_alert_and_switch_to_calibration(
+            client, twin_uuid, follower_port, follower_id,
+            leader_port=leader_port, leader_id=leader_id,
+            recovery_command="teleoperate",
+            device_type="leader",
         )
         return
 
