@@ -126,6 +126,21 @@ def _get_primary_robot_json_path(primary_uuid: str):
     return config_dir / f"{primary_uuid}.json"
 
 
+def _load_primary_robot_twin(primary_uuid: str) -> dict | None:
+    """Load primary robot twin JSON. Returns None if not found or invalid."""
+    import json
+
+    path = _get_primary_robot_json_path(primary_uuid)
+    if not path.is_file():
+        return None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) and data.get("uuid") else None
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 def _load_all_twin_jsons() -> list[dict]:
     """Load all twin JSON files from edge config dir (from edge-core)."""
     import json
@@ -683,7 +698,7 @@ def _discover_cameras_for_so101(primary_uuid: str) -> list[dict]:
 
     logger.info("After depth assignment: %d camera(s) in result", len(result))
 
-    # RGB twins (robot sensors + attached without depth) → CV2, fallback to RealSense if no CV2
+    # RGB twins (robot sensors + attached without depth) → CV2 only (never RealSense)
     rgb_twins = robot_cams + [c for c in attached if not c.get("has_depth")]
     for c in rgb_twins:
         dev = c.get("video_device")
@@ -691,11 +706,11 @@ def _discover_cameras_for_so101(primary_uuid: str) -> list[dict]:
         if dev is not None:
             if _is_device_used(dev):
                 continue
+            if _is_realsense_device(dev):
+                continue  # Do not assign RealSense to non-RealSense (RGB) twin
             _mark_device_used(dev)
         else:
             dev = _assign_from_pool(cv2_devices)
-            if dev is None:
-                dev = _assign_from_pool(realsense_devices)
             used_default = dev is not None
         if dev is not None:
             # Infer type from device: RealSense must use realsense, not cv2
@@ -714,10 +729,24 @@ def _discover_cameras_for_so101(primary_uuid: str) -> list[dict]:
     logger.info("After RGB assignment: %d camera(s) in result", len(result))
 
     # 3. Unassigned devices: assign to robot twin as wrist/primary (stream to robot)
-    unassigned = [
+    # Do NOT assign RealSense to a non-RealSense twin (e.g. SO101 robot arm)
+    primary_twin = _load_primary_robot_twin(primary_uuid)
+    robot_accepts_realsense = primary_twin and (
+        _twin_is_realsense(primary_twin) or _twin_has_depth_sensor(primary_twin)
+    )
+    all_unassigned = [
         d for d in realsense_devices + cv2_devices
         if not _is_device_used(d.get("primary_path") or d.get("index", "?"))
     ]
+    unassigned = (
+        all_unassigned
+        if robot_accepts_realsense
+        else [d for d in all_unassigned if d in cv2_devices]
+    )
+    if not robot_accepts_realsense and any(d in realsense_devices for d in all_unassigned):
+        logger.info(
+            "Primary robot is not RealSense/depth twin; skipping RealSense device(s) for unassigned assignment"
+        )
     logger.info(
         "Unassigned devices: %d available %s, adding up to %d (slots left=%d)",
         len(unassigned),
