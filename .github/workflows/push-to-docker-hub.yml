@@ -11,8 +11,18 @@ env:
 
 jobs:
   build-and-push:
-    name: Build and Push Docker Image
+    name: Build and Push (${{ matrix.variant }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: standard
+            suffix: ""
+            enable_realsense: "false"
+          - variant: realsense
+            suffix: "-realsense"
+            enable_realsense: "true"
 
     steps:
       - name: Checkout code
@@ -42,16 +52,11 @@ jobs:
         with:
           images: ${{ env.DOCKER_IMAGE }}
           tags: |
-            # Tag with "latest" on main branch push
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            # Tag with version from pyproject.toml on main branch push
-            type=raw,value=${{ steps.version.outputs.version }},enable=${{ github.ref == 'refs/heads/main' }}
-            # Tag with "dev" on dev branch push
-            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
-            # Tag with semver on version tags (v1.2.3 -> 1.2.3)
-            type=semver,pattern={{version}}
-            # Short SHA for traceability
-            type=sha,prefix=
+            type=raw,value=latest${{ matrix.suffix }},enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ steps.version.outputs.version }}${{ matrix.suffix }},enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=dev${{ matrix.suffix }},enable=${{ github.ref == 'refs/heads/dev' }}
+            type=semver,pattern={{version}},suffix=${{ matrix.suffix }}
+            type=sha,prefix=,suffix=${{ matrix.suffix }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -61,5 +66,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          build-args: |
+            ENABLE_REALSENSE=${{ matrix.enable_realsense }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}

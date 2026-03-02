@@ -577,6 +577,18 @@ docker run --rm -e CYBERWAVE_API_KEY=... -e CYBERWAVE_TWIN_UUID=... cyberwave-so
 
 For full automatic setup, run via edge core so it can mount the config directory and twin JSONs.
 
+### Building with RealSense support
+
+The default image only includes standard USB camera support. To include Intel RealSense (pyrealsense2), build with:
+
+```bash
+docker build --build-arg ENABLE_REALSENSE=true -t cyberwaveos/so101-driver:realsense .
+```
+
+On amd64 this installs pre-built pip wheels; on arm64 it builds librealsense from source (slower build).
+
+Pre-built images: `cyberwaveos/so101-driver:latest-realsense` and `cyberwaveos/so101-driver:dev-realsense`. Reference in asset metadata when using RealSense cameras.
+
 ## Development
 
 ### Install Development Dependencies

@@ -1,5 +1,7 @@
 FROM python:3.12-slim
 
+ARG ENABLE_REALSENSE=false
+
 WORKDIR /app
 
 # Install system dependencies for serial communication, OpenCV, and USB access
@@ -25,6 +27,13 @@ COPY MANIFEST.in .
 
 # Install the package and its dependencies
 RUN pip install --no-cache-dir -e .
+
+# Optional: install RealSense support (pyrealsense2)
+# On amd64 this uses pre-built pip wheels; on arm64 it builds from source.
+COPY install_realsense_docker.sh .
+RUN if [ "${ENABLE_REALSENSE}" = "true" ]; then \
+        chmod +x install_realsense_docker.sh && ./install_realsense_docker.sh; \
+    fi
 
 # Pre-create the directory that edge-core bind-mounts with the edge config
 RUN mkdir -p /app/.cyberwave
