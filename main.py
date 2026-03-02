@@ -433,6 +433,7 @@ def _device_identifiers(dev: str | int) -> set[str | int]:
 def _resolve_camera_device_for_twin(
     twin: dict,
     realsense_devices: list[dict],
+    fingerprint: str | None = None,
 ) -> str | int | None:
     """Resolve video_device or camera_id for a twin.
 
@@ -440,7 +441,8 @@ def _resolve_camera_device_for_twin(
     1. video_device: direct device path (e.g. "/dev/video6")
     2. sensors_devices: map of sensor name -> device path (e.g. {"wrist_camera": "/dev/video6"})
        Uses the first non-empty value; for single-sensor camera twins this is correct.
-    3. RealSense only: auto-bind if exactly one RealSense device (no sensors_devices needed).
+    3. edge_config.camera_config.source: when it is a /dev/video* path (local USB camera)
+    4. RealSense only: auto-bind if exactly one RealSense device (no sensors_devices needed).
 
     Returns the device path or index for cv2/RealSense to use.
     """
@@ -465,7 +467,24 @@ def _resolve_camera_device_for_twin(
             if dev and str(dev).strip():
                 return str(dev).strip()
 
-    # 3. RealSense only: auto-bind if single device (no sensors_devices needed)
+    # 3. Check edge_config.camera_config.source (when it is a /dev/video* path)
+    fp = fingerprint or _load_edge_fingerprint()
+    if fp:
+        edge_configs = meta.get("edge_configs") or {}
+        if isinstance(edge_configs, dict):
+            binding = None
+            if edge_configs.get("edge_fingerprint") == fp:
+                binding = edge_configs
+            elif isinstance(edge_configs.get(fp), dict):
+                binding = edge_configs[fp]
+            if isinstance(binding, dict):
+                camera_config = binding.get("camera_config")
+                if isinstance(camera_config, dict):
+                    source = camera_config.get("source")
+                    if isinstance(source, str) and source.strip().startswith("/dev/video"):
+                        return source.strip()
+
+    # 4. RealSense only: auto-bind if single device (no sensors_devices needed)
     if not _twin_is_realsense(twin) and not _twin_has_depth_sensor(twin):
         return None  # Non-RealSense without sensors_devices: caller will use default
 
@@ -512,6 +531,7 @@ def _discover_cameras_for_so101(primary_uuid: str) -> list[dict]:
     discovered = _discover_devices_via_v4l2()
     realsense_devices = _filter_realsense_devices(discovered)
     cv2_devices = _filter_cv2_devices(discovered)
+    fingerprint = _load_edge_fingerprint()
 
     # 1. Collect all camera twins (robot sensors + attached + workspace camera twins)
     robot_cams = _get_robot_twin_sensor_cameras(primary_uuid)
@@ -544,7 +564,7 @@ def _discover_cameras_for_so101(primary_uuid: str) -> list[dict]:
                 setup_name = ADDITIONAL_SETUP_NAMES[min(additional_idx, len(ADDITIONAL_SETUP_NAMES) - 1)]
                 additional_idx += 1
 
-        video_device = _resolve_camera_device_for_twin(t, realsense_devices)
+        video_device = _resolve_camera_device_for_twin(t, realsense_devices, fingerprint)
         attached.append({
             "twin_uuid": t_uuid,
             "attach_to_link": t.get("attach_to_link", ""),
