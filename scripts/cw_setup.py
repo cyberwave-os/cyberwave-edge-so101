@@ -51,11 +51,14 @@ def create_setup_config(
     wrist_camera: bool = False,
     wrist_camera_twin_uuid: str | None = None,
     wrist_camera_id: int | str = 0,
+    wrist_camera_type: str = "cv2",
+    wrist_camera_enable_depth: bool = False,
     wrist_camera_resolution: str = "VGA",
     wrist_camera_keyframe_interval: int | None = 60,
     additional_camera_type: str | None = None,
     additional_camera_id: int | str = 1,
     additional_camera_twin_uuid: str | None = None,
+    additional_cameras: list[dict] | None = None,
     camera_fps: int = 30,
     resolution: str = "VGA",
     enable_depth: bool = False,
@@ -67,6 +70,8 @@ def create_setup_config(
     """Build setup config dict.
 
     twin_uuid: SO101 robot twin UUID (used by teleoperate when --setup, no other args).
+    additional_cameras: If provided, used instead of additional_camera_* scalar params.
+      Each dict: setup_name, camera_type, camera_id, twin_uuid, enable_depth.
     """
     config: dict = {
         "twin_uuid": twin_uuid or wrist_camera_twin_uuid,
@@ -75,6 +80,7 @@ def create_setup_config(
         "camera_only": False,
         "wrist_camera": wrist_camera,
         "wrist_camera_id": wrist_camera_id,
+        "wrist_camera_type": wrist_camera_type,
         "wrist_camera_twin_uuid": wrist_camera_twin_uuid,
         "wrist_camera_name": "wrist_camera",
         "wrist_camera_fourcc": "MJPG" if wrist_camera else None,
@@ -83,7 +89,29 @@ def create_setup_config(
         "additional_cameras": [],
     }
 
-    if additional_camera_type:
+    if additional_cameras:
+        for i, ac in enumerate(additional_cameras):
+            setup_name = ac.get("setup_name", "primary" if i == 0 else "secondary")
+            cam_name = "external" if setup_name == "primary" else "external2"
+            res = ac.get("resolution")
+            if res is None:
+                res = _parse_resolution(resolution)
+            elif isinstance(res, str):
+                res = _parse_resolution(res)
+            config["additional_cameras"].append({
+                "setup_name": setup_name,
+                "camera_type": ac.get("camera_type", "cv2"),
+                "camera_id": ac.get("camera_id", i + 1),
+                "camera_name": cam_name,
+                "twin_uuid": ac.get("twin_uuid"),
+                "fps": camera_fps,
+                "resolution": res,
+                "enable_depth": ac.get("enable_depth", False),
+                "depth_fps": depth_fps,
+                "depth_resolution": (_parse_resolution(depth_resolution) if depth_resolution else None),
+                "depth_publish_interval": depth_publish_interval,
+            })
+    elif additional_camera_type:
         add_cam: dict = {
             "camera_type": additional_camera_type,
             "camera_id": additional_camera_id,
