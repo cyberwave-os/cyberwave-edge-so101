@@ -65,6 +65,7 @@ def _trigger_alert_and_switch_to_calibration(
 
     metadata = {
         "calibration": {
+            "device_type": device_type,
             "follower_port": follower_port,
             "follower_id": follower_id,
         }
@@ -1169,7 +1170,10 @@ def _handle_calibration_start(
         or data.get("port")
         or (os.getenv("CYBERWAVE_METADATA_FOLLOWER_PORT") if device_type == "follower" else os.getenv("CYBERWAVE_METADATA_LEADER_PORT"))
     )
-    device_id = data.get("follower_id") or data.get("leader_id") or data.get("id") or (device_type + "1")
+    if device_type == "leader":
+        device_id = data.get("leader_id") or data.get("id") or "leader1"
+    else:
+        device_id = data.get("follower_id") or data.get("id") or "follower1"
 
     if not port:
         logger.error("No port for calibration (type=%s)", device_type)
