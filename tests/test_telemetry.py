@@ -20,8 +20,8 @@ from motors import MotorNormMode
 class TestPublishInitialObservations:
     """Tests for publish_initial_observations (telemetry_start with initial observations)."""
 
-    def test_calls_publish_telemetry_start_with_follower_observations(self):
-        """publish_initial_observations calls mqtt_client.publish_telemetry_start with metadata."""
+    def test_calls_publish_telemetry_start_message_with_follower_observations(self):
+        """publish_initial_observations calls mqtt_client.publish_telemetry_start_message with metadata."""
         from utils.cw_teleoperate_helpers import publish_initial_observations
 
         mock_mqtt = MagicMock()
@@ -50,8 +50,8 @@ class TestPublishInitialObservations:
             fps=100,
         )
 
-        mock_mqtt.publish_telemetry_start.assert_called_once()
-        call_args = mock_mqtt.publish_telemetry_start.call_args
+        mock_mqtt.publish_telemetry_start_message.assert_called_once()
+        call_args = mock_mqtt.publish_telemetry_start_message.call_args
         assert call_args[0][0] == "twin-abc-123"
         metadata = call_args[0][1]
         assert metadata["fps"] == 100
@@ -59,7 +59,7 @@ class TestPublishInitialObservations:
         assert "_1" in metadata["observations"]["edge_follower"]
         assert "_2" in metadata["observations"]["edge_follower"]
 
-    def test_calls_publish_telemetry_start_with_leader_and_follower(self):
+    def test_calls_publish_telemetry_start_message_with_leader_and_follower(self):
         """publish_initial_observations includes both leader and follower when both provided."""
         from utils.cw_teleoperate_helpers import publish_initial_observations
 
@@ -90,11 +90,11 @@ class TestPublishInitialObservations:
             fps=100,
         )
 
-        metadata = mock_mqtt.publish_telemetry_start.call_args[0][1]
+        metadata = mock_mqtt.publish_telemetry_start_message.call_args[0][1]
         assert "edge_leader" in metadata["observations"]
         assert "edge_follower" in metadata["observations"]
 
-    def test_does_not_call_publish_telemetry_start_when_no_observations(self):
+    def test_does_not_call_publish_telemetry_start_message_when_no_observations(self):
         """publish_initial_observations does not call when leader and follower are None."""
         from utils.cw_teleoperate_helpers import publish_initial_observations
 
@@ -113,7 +113,7 @@ class TestPublishInitialObservations:
             motor_id_to_schema_joint={},
         )
 
-        mock_mqtt.publish_telemetry_start.assert_not_called()
+        mock_mqtt.publish_telemetry_start_message.assert_not_called()
 
 
 class TestMainStopCurrentOperationTelemetry:
@@ -286,7 +286,7 @@ class TestMainTeleoperateIntegration:
         twin_uuid = "integration-twin-001"
         mock_client = MagicMock()
         mock_client.mqtt.connected = True
-        mock_client.mqtt.publish_telemetry_start = MagicMock()
+        mock_client.mqtt.publish_telemetry_start_message = MagicMock()
         mock_client.mqtt.publish_telemetry_end = MagicMock()
         mock_client.mqtt._publish_disconnect_message = MagicMock()
         mock_client.mqtt.publish_command_message = MagicMock()
@@ -310,7 +310,7 @@ class TestMainTeleoperateIntegration:
         def _minimal_teleoperate(leader, cyberwave_client, follower, robot, cameras=None, stop_event=None, **kwargs):
             """Minimal teleoperate that emits telemetry messages for integration test."""
             mqtt = cyberwave_client.mqtt
-            mqtt.publish_telemetry_start(str(robot.uuid), {"fps": 100, "observations": {}})
+            mqtt.publish_telemetry_start_message(str(robot.uuid), {"fps": 100, "observations": {}})
             try:
                 if stop_event:
                     stop_event.wait(timeout=2.0)
@@ -339,6 +339,6 @@ class TestMainTeleoperateIntegration:
                                 )
 
         # Verify telemetry messages
-        mock_client.mqtt.publish_telemetry_start.assert_called()
+        mock_client.mqtt.publish_telemetry_start_message.assert_called()
         mock_client.mqtt.publish_telemetry_end.assert_called_with(twin_uuid)
         mock_client.mqtt._publish_disconnect_message.assert_called_with(twin_uuid)

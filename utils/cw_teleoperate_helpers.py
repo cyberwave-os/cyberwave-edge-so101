@@ -161,9 +161,11 @@ def publish_initial_observations(
     """
     Publish a single telemetry_start with both leader and follower observations.
 
+    Uses publish_telemetry_start_message (low-level, no SDK already_started check).
+    Caller (cw_teleoperate.py, cw_remoteoperate.py) manages "already started" state.
+
     Waits for both leader and follower to read positions, then sends one message
     with observations keyed by source_type: {"edge_leader": {...}, "edge_follower": {...}}.
-    Registers the twin so no duplicate telemetry_start is sent on first joint update.
     """
     twin_uuid = str(robot.uuid)
     observations: Dict[str, Dict[str, float]] = {}
@@ -196,5 +198,5 @@ def publish_initial_observations(
             "observations": observations,
         }
         logger.info("Publishing telemetry_start for twin %s", twin_uuid)
-        mqtt_client.publish_telemetry_start(twin_uuid, metadata)
+        mqtt_client.publish_telemetry_start_message(twin_uuid, metadata)
         logger.info("telemetry_start published successfully")

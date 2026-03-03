@@ -203,20 +203,21 @@ def remoteoperate(
         else:
             status_tracker.update_mqtt_status(mqtt_client.connected if mqtt_client else False)
 
-        # ALWAYS send telemetry_start with follower observations before any joint updates.
-        # This registers the twin so no duplicate telemetry_start is sent by heartbeat or camera.
-        publish_initial_observations(
-            leader=None,
-            follower=follower,
-            robot=robot,
-            mqtt_client=mqtt_client,
-            leader_calibration=None,
-            follower_calibration=follower_calibration,
-            joint_name_to_norm_mode=joint_name_to_norm_mode,
-            motor_id_to_schema_joint=motor_id_to_schema_joint,
-            fps=CONTROL_RATE_HZ,
-        )
-        telemetry_started = True
+        # Send telemetry_start with follower observations before any joint updates.
+        # Script manages "already started" - only call once per session.
+        if not telemetry_started:
+            publish_initial_observations(
+                leader=None,
+                follower=follower,
+                robot=robot,
+                mqtt_client=mqtt_client,
+                leader_calibration=None,
+                follower_calibration=follower_calibration,
+                joint_name_to_norm_mode=joint_name_to_norm_mode,
+                motor_id_to_schema_joint=motor_id_to_schema_joint,
+                fps=CONTROL_RATE_HZ,
+            )
+            telemetry_started = True
 
         # Send initial position per joint for real-time display (heartbeat will continue)
         try:
