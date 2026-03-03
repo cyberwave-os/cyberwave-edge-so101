@@ -252,11 +252,27 @@ def create_joint_state_callback(
                 )
                 return
 
+            # Support both flat ({"_1": pos, "_2": pos, ...}) and nested ({"positions": {"_1": pos, ...}}) formats
+            if "positions" in data and isinstance(data["positions"], dict):
+                joint_items = data["positions"].items()
+            else:
+                joint_items = data.items()
+
             action = current_state.copy()
             joint_states_for_status = {}
             any_valid = False
-            for joint_name, position_val in data.items():
-                if joint_name in ("source_type", "timestamp", "session_id", "type"):
+            for joint_name, position_val in joint_items:
+                if joint_name in (
+                    "source_type",
+                    "timestamp",
+                    "session_id",
+                    "type",
+                    "positions",
+                    "velocities",
+                    "efforts",
+                    "source_subtype",
+                    "workload_uuid",
+                ):
                     continue
                 # Resolve schema joint names (e.g. "_1") to SO101 joint names
                 resolved_name = joint_name
