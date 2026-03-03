@@ -120,7 +120,7 @@ class TestMainStopCurrentOperationTelemetry:
     """Tests for main._stop_current_operation sending disconnect."""
 
     def test_sends_disconnect_when_stopping_operation(self):
-        """_stop_current_operation calls _publish_disconnect_message when thread was running."""
+        """_stop_current_operation calls publish_disconnected when thread was running."""
         import main as main_module
 
         mock_client = MagicMock()
@@ -135,7 +135,7 @@ class TestMainStopCurrentOperationTelemetry:
                             with patch.object(main_module, "_calibration_proc", None):
                                 main_module._stop_current_operation()
 
-        mock_client.mqtt._publish_disconnect_message.assert_called_once_with("twin-123")
+        mock_client.mqtt.publish_disconnected.assert_called_once_with("twin-123")
 
     def test_does_not_send_disconnect_when_no_thread(self):
         """_stop_current_operation does not call disconnect when no operation was running."""
@@ -148,7 +148,7 @@ class TestMainStopCurrentOperationTelemetry:
                 with patch.object(main_module, "_calibration_proc", None):
                     main_module._stop_current_operation()
 
-        mock_client.mqtt._publish_disconnect_message.assert_not_called()
+        mock_client.mqtt.publish_disconnected.assert_not_called()
 
     def test_does_not_send_disconnect_when_client_or_twin_missing(self):
         """_stop_current_operation does not crash when _current_client or _current_twin_uuid is None."""
@@ -288,7 +288,7 @@ class TestMainTeleoperateIntegration:
         mock_client.mqtt.connected = True
         mock_client.mqtt.publish_telemetry_start_message = MagicMock()
         mock_client.mqtt.publish_telemetry_end = MagicMock()
-        mock_client.mqtt._publish_disconnect_message = MagicMock()
+        mock_client.mqtt.publish_disconnected = MagicMock()
         mock_client.mqtt.publish_command_message = MagicMock()
 
         mock_robot = MagicMock()
@@ -341,4 +341,4 @@ class TestMainTeleoperateIntegration:
         # Verify telemetry messages
         mock_client.mqtt.publish_telemetry_start_message.assert_called()
         mock_client.mqtt.publish_telemetry_end.assert_called_with(twin_uuid)
-        mock_client.mqtt._publish_disconnect_message.assert_called_with(twin_uuid)
+        mock_client.mqtt.publish_disconnected.assert_called_with(twin_uuid)
