@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     libusb-1.0-0 \
     udev \
+    v4l-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy project files
@@ -32,7 +33,7 @@ RUN pip install --no-cache-dir -e .
 # On amd64 this uses pre-built pip wheels; on arm64 it builds from source.
 COPY install_realsense_docker.sh .
 RUN if [ "${ENABLE_REALSENSE}" = "true" ]; then \
-        chmod +x install_realsense_docker.sh && ./install_realsense_docker.sh; \
+    chmod +x install_realsense_docker.sh && ./install_realsense_docker.sh; \
     fi
 
 # Pre-create the directory that edge-core bind-mounts with the edge config
