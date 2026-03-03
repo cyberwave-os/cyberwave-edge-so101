@@ -37,7 +37,9 @@ _calibration_client: Optional[Cyberwave] = None
 _calibration_twin_uuid: Optional[str] = None
 _calibration_alert_uuid: Optional[str] = None
 
-# When calibration completes, run this command (teleoperate or remoteoperate)
+# When calibration completes, run this command. Only teleoperate/remoteoperate are
+# stored; calibrate is never stored to avoid infinite loops.
+RECOVERY_COMMANDS = frozenset({"teleoperate", "remoteoperate"})
 _pending_recovery_command: Optional[str] = None
 
 
@@ -95,7 +97,7 @@ def _trigger_alert_and_switch_to_calibration(
     )
     logger.info("Created calibration alert %s for twin %s", alert.uuid, twin_uuid)
 
-    if recovery_command:
+    if recovery_command and recovery_command in RECOVERY_COMMANDS:
         _pending_recovery_command = recovery_command
         logger.info("Stored recovery command: %s (will run after calibration)", recovery_command)
 
@@ -1133,9 +1135,9 @@ def _run_calibration_with_advance(
                 logger.info("Calibration alert %s resolved", alert_uuid)
             except Exception:
                 logger.exception("Failed to resolve calibration alert")
-        # Recover: run the pending command (teleoperate or remoteoperate)
+        # Recover: run the pending command (only teleoperate or remoteoperate)
         global _pending_recovery_command
-        if _pending_recovery_command:
+        if _pending_recovery_command and _pending_recovery_command in RECOVERY_COMMANDS:
             cmd = _pending_recovery_command
             _pending_recovery_command = None
             logger.info("Calibration complete; recovering with command: %s", cmd)
