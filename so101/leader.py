@@ -1,0 +1,154 @@
+"""SO101 Leader class for teleoperation."""
+
+import logging
+from pathlib import Path
+from typing import Any, Callable, Dict, Optional
+
+from serial.serialutil import SerialException
+
+from motors import (
+    FeetechMotorsBus,
+    MotorCalibration,
+)
+from so101.robot import SO101Robot
+from utils.config import LeaderConfig
+from utils.errors import DeviceNotConnectedError
+from utils.utils import load_calibration
+
+logger = logging.getLogger(__name__)
+
+
+class SO101Leader(SO101Robot):
+    """SO101 Leader device for teleoperation."""
+
+    def __init__(
+        self,
+        config: Optional[LeaderConfig] = None,
+        port: Optional[str] = None,
+        use_degrees: bool = True,
+        id: str = "leader1",
+        calibration_dir: Optional[Path] = None,
+    ):
+        """
+        Initialize SO101 Leader.
+
+        Args:
+            config: LeaderConfig object (if provided, other parameters are ignored)
+            port: Serial port path (e.g., "/dev/tty.usbmodem123")
+            use_degrees: Whether to use degrees for position values
+            id: Device identifier for calibration file management
+            calibration_dir: Directory for calibration files (default: ~/.cyberwave/so101_lib/calibrations)
+        """
+        super().__init__()
+        if config is not None:
+            self.config = config
+        else:
+            if port is None:
+                raise ValueError("Either 'config' or 'port' must be provided")
+            self.config = LeaderConfig(
+                port=port, use_degrees=use_degrees, id=id, calibration_dir=calibration_dir
+            )
+
+        self.calibration: Optional[Dict[str, MotorCalibration]] = None
+        self._last_known_positions: Dict[str, float] = {}
+
+    @property
+    def connected(self) -> bool:
+        """Check if leader is connected."""
+        return self._connected and self.bus is not None and self.bus.connected
+
+    def connect(
+        self,
+        calibrate: bool = False,
+        on_state_change: Optional[Callable[[str], None]] = None,
+        on_joint_progress: Optional[
+            Callable[[Dict[str, float], Dict[str, float], Dict[str, float]], None]
+        ] = None,
+        robot: Optional[Any] = None,
+    ) -> None:
+        """
+        Connect to the leader device.
+
+        Args:
+            calibrate: Whether to calibrate motors on connection
+            on_state_change: Optional callback(state) when calibration step changes.
+                Passed to calibrate() when running calibration. Used by frontend to show
+                "Go ahead" button at zero_pose_waiting / joint_calibration_waiting.
+            on_joint_progress: Optional callback for joint progress during calibration.
+            robot: Optional Cyberwave twin object, passed through to calibrate().
+        """
+        if self.connected:
+            logger.warning("Leader is already connected")
+            return
+
+        # Load calibration if available (before initializing bus)
+        calibration_path = self.config.calibration_dir / f"{self.config.id}.json"
+        if calibration_path.exists():
+            logger.info(f"Loading calibration from {calibration_path}")
+            calib_data = load_calibration(calibration_path)
+            self.calibration = {}
+            for name, data in calib_data.items():
+                self.calibration[name] = MotorCalibration(**data)
+        else:
+            logger.info("No calibration file found, using defaults")
+            self.calibration = None
+
+        # Initialize motor bus with calibration
+        self.bus = FeetechMotorsBus(
+            port=self.config.port, motors=self.motors, calibration=self.calibration
+        )
+        self.bus.connect()
+
+        # Calibrate if requested, otherwise restore calibration to motors
+        if calibrate:
+            self.calibrate(
+                on_state_change=on_state_change,
+                on_joint_progress=on_joint_progress,
+                robot=robot,
+            )
+        elif self.calibration:
+            logger.info("Restoring calibration to leader motors (homing offset, position limits)")
+            self.bus.write_calibration(self.calibration)
+
+        self._connected = True
+        # Leader is passive (torque disabled) - user moves it manually
+        # Torque remains disabled unless explicitly enabled
+        # Read initial positions
+        try:
+            self._last_known_positions = self.get_observation()
+        except Exception:
+            # If we can't read initial positions, start with empty dict
+            self._last_known_positions = {}
+        logger.info("Leader connected successfully (torque disabled - passive mode)")
+
+    def get_observation(self) -> Dict[str, float]:
+        """
+        Get current motor positions as observation dictionary.
+
+        Returns:
+            Dictionary mapping motor names (with .pos suffix) to normalized position values
+        """
+        if not self.connected:
+            raise DeviceNotConnectedError("Leader is not connected")
+
+        try:
+            obs = self.bus.sync_read("Present_Position", normalize=True)
+            obs = {f"{motor}.pos": val for motor, val in obs.items()}
+            self._last_known_positions = obs
+            return obs
+        except SerialException as e:
+            logger.warning(
+                f"Serial communication error reading leader positions: {e}. "
+                "Using last known positions."
+            )
+            return self._last_known_positions if self._last_known_positions else {}
+
+    @property
+    def torque_enabled(self) -> bool:
+        """Check if torque is enabled."""
+        return self._torque_enabled
+
+    @property
+    def calibration_fpath(self) -> Path:
+        """Get calibration file path."""
+        return self.config.calibration_dir / f"{self.config.id}.json"
