@@ -172,7 +172,7 @@ Use `--find-port` to discover the port interactively. The `--id` defaults to `le
 
 1. Move the device to the zero pose (starting position) as shown in the image below:
 
-   ![SO101 Zero Pose](so101-zero-pose.png)
+   ![SO101 Zero Pose](assets/so101-zero-pose.png)
 
    This is the recommended starting position for calibration, with all joints in a well-defined configuration.
 
