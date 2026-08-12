@@ -1,0 +1,37 @@
+registry_id: the-robot-studio/so101
+
+mqtt:
+  schema_version: 1
+  driver_family: python
+
+  joint:
+    update:
+      direction: both
+      payload_schema_ref: JointUpdatePayload
+      description: >-
+        Bidirectional joint bus on cyberwave/joint/{twin_uuid}/update. Remoteoperate and teleoperate
+        subscribe here for incoming tele commands (source_type tele: single-joint, multi-joint,
+        flat, delta, or aggregated payloads) and publish follower observations back on the same
+        topic (source_type edge_follower via update_joints_state). Simulation and UI teleop also
+        publish here (sim_tele, tele). Angles in radians.
+      units:
+        position: radians
+      source_types: [tele, sim_tele, edge, edge_follower]
+      direction_notes: >-
+        SDK subscribe_joint_states uses wildcard cyberwave/joint/{twin_uuid}/+; the update segment
+        is the aggregate command/observation channel used by cw_remoteoperate.py.
+    "+":
+      direction: subscribe
+      payload_schema_ref: JointStateMessage
+      description: >-
+        MQTT single-level wildcard for per-joint named segments (and the update segment). Used by
+        SDK subscribe_joint_states; remoteoperate filters to topics ending in /update for tele input.
+
+  twin:
+    command:
+      direction: both
+      payload_schema_ref: TwinCommandPayload
+      description: >-
+        Primary command ingress for SO101 scripts (teleoperate, calibrate, stop) and status.
+        Envelope: { command, data, source_type, timestamp }.
+      source_types: [tele, edge]
